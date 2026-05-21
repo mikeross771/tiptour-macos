@@ -90,7 +90,9 @@ final class TipTourHarnessServer {
             }
 
             if self.requestDataIsComplete(updatedRequestData) || isComplete {
-                self.respond(to: updatedRequestData, on: connection)
+                Task { @MainActor in
+                    await self.respond(to: updatedRequestData, on: connection)
+                }
             } else {
                 self.receiveHTTPData(from: connection, buffer: updatedRequestData)
             }
@@ -116,7 +118,7 @@ final class TipTourHarnessServer {
         return requestData.count - bodyStartIndex >= contentLength
     }
 
-    private func respond(to requestData: Data, on connection: NWConnection) {
+    private func respond(to requestData: Data, on connection: NWConnection) async {
         let request = parseRequest(requestData)
 
         let response: HarnessHTTPResponse
@@ -128,6 +130,9 @@ final class TipTourHarnessServer {
                 "ok": true,
                 "tools": [
                     "tiptour.observe",
+                    "tiptour.targets",
+                    "tiptour.plan_next_action",
+                    "tiptour.action_history",
                     "tiptour.submit_workflow_plan"
                 ],
                 "single_action": true,
@@ -135,6 +140,12 @@ final class TipTourHarnessServer {
             ])
         case ("GET", "/v1/observe"):
             response = encodableResponse(tipTourEngine.observe())
+        case ("GET", "/v1/targets"), ("GET", "/v1/grounding-targets"):
+            response = await handleTargetsRequest()
+        case ("GET", "/v1/action-history"), ("GET", "/v1/action_history"):
+            response = encodableResponse(tipTourEngine.actionHistory())
+        case ("POST", "/v1/plan-next-action"), ("POST", "/v1/plan_next_action"):
+            response = await handlePlanNextActionRequest(body: request.body)
         case ("POST", "/v1/workflow-plan"), ("POST", "/v1/submit_workflow_plan"):
             response = handleWorkflowPlanRequest(body: request.body)
         default:
@@ -148,6 +159,40 @@ final class TipTourHarnessServer {
         connection.send(content: response.data, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+
+    private func handleTargetsRequest() async -> HarnessHTTPResponse {
+        let targets = await tipTourEngine.localPerceptionTargets(
+            refresh: true,
+            reason: "harness /v1/targets"
+        )
+        return encodableResponse(targets)
+    }
+
+    private func handlePlanNextActionRequest(body: Data) async -> HarnessHTTPResponse {
+        do {
+            let request = try JSONDecoder().decode(HarnessPlanNextActionRequest.self, from: body)
+            let result = await tipTourEngine.planNextAction(
+                goal: request.goal,
+                app: request.app,
+                requestedActionType: WorkflowStep.StepType.normalized(from: request.type ?? request.action),
+                requestedTargetLabel: request.targetLabel ?? request.target_label ?? request.label,
+                execute: request.execute ?? true,
+                allowScreenshotPlanning: request.allowScreenshotPlanning ?? request.allow_screenshot_planning ?? false,
+                validateStateChange: request.validateStateChange ?? request.validate_state_change ?? true
+            )
+            return encodableResponse(result)
+        } catch {
+            return jsonResponse(
+                [
+                    "ok": false,
+                    "reason": "invalid_request",
+                    "message": error.localizedDescription
+                ],
+                statusCode: 400,
+                statusText: "Bad Request"
+            )
+        }
     }
 
     private func handleWorkflowPlanRequest(body: Data) -> HarnessHTTPResponse {
@@ -233,6 +278,21 @@ private struct HarnessHTTPRequest {
 
 private struct HarnessHTTPResponse {
     let data: Data
+}
+
+private struct HarnessPlanNextActionRequest: Decodable {
+    let goal: String
+    let app: String?
+    let type: String?
+    let action: String?
+    let label: String?
+    let targetLabel: String?
+    let target_label: String?
+    let execute: Bool?
+    let allowScreenshotPlanning: Bool?
+    let allow_screenshot_planning: Bool?
+    let validateStateChange: Bool?
+    let validate_state_change: Bool?
 }
 
 private struct HarnessWorkflowPlanRequest: Decodable {

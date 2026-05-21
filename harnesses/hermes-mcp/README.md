@@ -31,6 +31,11 @@ mcp_servers:
 Hermes will discover:
 
 - `tiptour_observe`
+- `tiptour_targets`
+- `tiptour_action_history`
+- `tiptour_plan_next_action`
 - `tiptour_submit_workflow_plan`
 
-TipTour still clamps every submitted workflow to one action. Hermes should call `tiptour_observe`, take one action, then observe again.
+Prefer `tiptour_plan_next_action` for UI clicks because it refreshes TipTour's local YOLO/OCR targets, matches a real on-screen label, executes one action through TipTour's pointer workflow, validates that the local target set changed, and tries one local repair before failing. This is safer than asking Hermes to guess `box_2d` coordinates.
+
+TipTour still clamps every submitted workflow to one action. Hermes should call `tiptour_observe` or `tiptour_targets`, take one action, then observe again. Use `validate_state_change=False` for clicks where no visible UI change is expected, such as focusing a text field.

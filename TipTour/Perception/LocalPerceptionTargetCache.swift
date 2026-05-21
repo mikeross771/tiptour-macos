@@ -6,6 +6,19 @@ import Foundation
 final class LocalPerceptionTargetCache: @unchecked Sendable {
     static let shared = LocalPerceptionTargetCache()
 
+    struct SnapshotTarget: Encodable {
+        let id: String
+        let label: String
+        let source: String
+        let confidence: Double
+        let screenshotBox: [Double]
+        let normalizedBox2D: [Int]
+        let globalCenter: [Double]
+        let globalBox: [Double]
+        let displayFrame: [Double]
+        let cacheAgeMs: Int
+    }
+
     struct ResolvedTarget {
         let label: String
         let source: String
@@ -13,6 +26,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         let globalScreenRect: CGRect
         let displayFrame: CGRect
         let cacheAgeMs: Int
+        let normalizedBox2D: [Int]
     }
 
     private struct Candidate {
@@ -116,8 +130,59 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
             globalScreenPoint: CGPoint(x: globalRect.midX, y: globalRect.midY),
             globalScreenRect: globalRect,
             displayFrame: currentSnapshot.displayFrame,
-            cacheAgeMs: cacheAgeMs
+            cacheAgeMs: cacheAgeMs,
+            normalizedBox2D: normalizedBox2D(
+                for: matchedCandidate.screenshotRect,
+                imageSize: currentSnapshot.imageSize
+            )
         )
+    }
+
+    func currentTargets(limit: Int = 160) -> [SnapshotTarget] {
+        lock.lock()
+        let currentSnapshot = snapshot
+        lock.unlock()
+
+        guard let currentSnapshot else { return [] }
+
+        let cacheAgeMs = Int(Date().timeIntervalSince(currentSnapshot.timestamp) * 1000)
+        guard cacheAgeMs < 60_000 else { return [] }
+
+        return currentSnapshot.candidates
+            .filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { first, second in
+                if first.source == second.source {
+                    return first.confidence > second.confidence
+                }
+                return first.source == "ocr"
+            }
+            .prefix(limit)
+            .map { candidate in
+                let globalRect = screenshotPixelRectToGlobalScreen(
+                    candidate.screenshotRect,
+                    imageSize: currentSnapshot.imageSize,
+                    displayFrame: currentSnapshot.displayFrame
+                )
+                return SnapshotTarget(
+                    id: targetID(for: candidate),
+                    label: candidate.label,
+                    source: candidate.source,
+                    confidence: candidate.confidence,
+                    screenshotBox: Self.array(from: candidate.screenshotRect),
+                    normalizedBox2D: normalizedBox2D(
+                        for: candidate.screenshotRect,
+                        imageSize: currentSnapshot.imageSize
+                    ),
+                    globalCenter: [globalRect.midX, globalRect.midY],
+                    globalBox: Self.array(from: globalRect),
+                    displayFrame: Self.array(from: currentSnapshot.displayFrame),
+                    cacheAgeMs: cacheAgeMs
+                )
+            }
+    }
+
+    func freshTargetCount() -> Int {
+        currentTargets().count
     }
 
     private func parseCandidates(from elements: [[String: Any]]) -> [Candidate] {
@@ -372,6 +437,35 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         let horizontalDistance = max(leftDistance, 0, rightDistance)
         let verticalDistance = max(topDistance, 0, bottomDistance)
         return hypot(horizontalDistance, verticalDistance)
+    }
+
+    private func normalizedBox2D(for screenshotRect: CGRect, imageSize: CGSize) -> [Int] {
+        let y1 = Int((screenshotRect.minY * 1000 / max(imageSize.height, 1)).rounded())
+        let x1 = Int((screenshotRect.minX * 1000 / max(imageSize.width, 1)).rounded())
+        let y2 = Int((screenshotRect.maxY * 1000 / max(imageSize.height, 1)).rounded())
+        let x2 = Int((screenshotRect.maxX * 1000 / max(imageSize.width, 1)).rounded())
+        return [
+            max(0, min(1000, y1)),
+            max(0, min(1000, x1)),
+            max(0, min(1000, y2)),
+            max(0, min(1000, x2))
+        ]
+    }
+
+    private func targetID(for candidate: Candidate) -> String {
+        let rect = candidate.screenshotRect
+        return [
+            candidate.source,
+            candidate.label,
+            "\(Int(rect.minX))",
+            "\(Int(rect.minY))",
+            "\(Int(rect.maxX))",
+            "\(Int(rect.maxY))"
+        ].joined(separator: ":")
+    }
+
+    private static func array(from rect: CGRect) -> [Double] {
+        [rect.minX, rect.minY, rect.maxX, rect.maxY]
     }
 }
 

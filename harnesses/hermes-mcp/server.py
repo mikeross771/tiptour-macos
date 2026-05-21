@@ -59,6 +59,51 @@ def tiptour_observe() -> dict[str, Any]:
 
 
 @mcp.tool()
+def tiptour_targets() -> dict[str, Any]:
+    """Refresh and return TipTour's current local YOLO/OCR grounding targets."""
+    return _request_json("/v1/targets")
+
+
+@mcp.tool()
+def tiptour_action_history() -> dict[str, Any]:
+    """Return recent TipTour grounded-action attempts and validation outcomes."""
+    return _request_json("/v1/action-history")
+
+
+@mcp.tool()
+def tiptour_plan_next_action(
+    goal: str,
+    app: str | None = None,
+    target_label: str | None = None,
+    action: str = "click",
+    execute: bool = True,
+    allow_screenshot_planning: bool = False,
+    validate_state_change: bool = True,
+) -> dict[str, Any]:
+    """Ask TipTour to choose one grounded local target and optionally execute it.
+
+    Prefer this over hand-written box_2d coordinates. TipTour refreshes its
+    local YOLO/OCR perception cache, matches target_label or goal against real
+    on-screen targets, executes one action, refreshes perception, and reports
+    whether the visible target set changed. If validation fails, TipTour tries
+    one local perception repair before giving up. It refuses to guess raw
+    coordinates when no target matches.
+    """
+    return _request_json(
+        "/v1/plan-next-action",
+        {
+            "goal": goal,
+            "app": app,
+            "target_label": target_label,
+            "action": action,
+            "execute": execute,
+            "allow_screenshot_planning": allow_screenshot_planning,
+            "validate_state_change": validate_state_change,
+        },
+    )
+
+
+@mcp.tool()
 def tiptour_submit_workflow_plan(
     goal: str,
     app: str | None,

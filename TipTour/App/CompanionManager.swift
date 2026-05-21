@@ -127,8 +127,11 @@ final class CompanionManager: ObservableObject {
         isHermesOrchestratorEnabledProvider: { [weak self] in
             self?.isHermesOrchestratorEnabled ?? false
         },
-        detectionElementCountProvider: { [weak self] in
-            self?.detectionOverlayElements.count ?? 0
+        detectionElementCountProvider: {
+            LocalPerceptionTargetCache.shared.freshTargetCount()
+        },
+        refreshLocalPerception: { [weak self] reason in
+            await self?.refreshNativeDetectionOverlay(reason: reason)
         },
         normalizeWorkflowSteps: { [weak self] steps, targetAppName in
             self?.normalizedWorkflowSteps(steps, targetAppName: targetAppName) ?? steps
