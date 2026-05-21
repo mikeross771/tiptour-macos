@@ -54,6 +54,11 @@ final class CompanionManager: ObservableObject {
     @Published var detectionOverlayDisplayFrame: CGRect?
     @Published var detectionOverlayHighlightedLabel: String?
 
+    @Published var isCuaActionDriverEnabled: Bool = UserDefaults.standard.object(forKey: "isCuaActionDriverEnabled") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "isCuaActionDriverEnabled")
+    @Published var isHermesOrchestratorEnabled: Bool = UserDefaults.standard.bool(forKey: "isHermesOrchestratorEnabled")
+
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
 
@@ -101,6 +106,40 @@ final class CompanionManager: ObservableObject {
 
     private var shouldRunNativeDetection: Bool {
         isAccurateGroundingEnabled || isDetectionOverlayEnabled
+    }
+
+    private lazy var engineFacade = TipTourEngine(
+        isAutopilotEnabledProvider: { [weak self] in
+            self?.isAutopilotEnabled ?? false
+        },
+        isMultiStepTourGuideEnabledProvider: { [weak self] in
+            self?.isMultiStepTourGuideEnabled ?? false
+        },
+        isScreenshotStreamingEnabledProvider: { [weak self] in
+            self?.isScreenshotStreamingEnabled ?? false
+        },
+        isAccurateGroundingEnabledProvider: { [weak self] in
+            self?.isAccurateGroundingEnabled ?? false
+        },
+        isCuaActionDriverEnabledProvider: { [weak self] in
+            self?.isCuaActionDriverEnabled ?? false
+        },
+        isHermesOrchestratorEnabledProvider: { [weak self] in
+            self?.isHermesOrchestratorEnabled ?? false
+        },
+        detectionElementCountProvider: { [weak self] in
+            self?.detectionOverlayElements.count ?? 0
+        },
+        normalizeWorkflowSteps: { [weak self] steps, targetAppName in
+            self?.normalizedWorkflowSteps(steps, targetAppName: targetAppName) ?? steps
+        },
+        startWorkflowPlan: { [weak self] plan in
+            self?.startWorkflowPlan(plan)
+        }
+    )
+
+    var tipTourEngine: TipTourEngine {
+        engineFacade
     }
 
     /// True when all four required permissions (accessibility, screen recording,
@@ -641,6 +680,35 @@ final class CompanionManager: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: "isAutopilotEnabled")
     }
 
+    func setCuaActionDriverEnabled(_ enabled: Bool) {
+        isCuaActionDriverEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isCuaActionDriverEnabled")
+    }
+
+    func setHermesOrchestratorEnabled(_ enabled: Bool) {
+        isHermesOrchestratorEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isHermesOrchestratorEnabled")
+    }
+
+    var tipTourConnections: [TipTourConnection] {
+        [
+            TipTourConnection(
+                id: "cua-action-driver",
+                displayName: "CUA Driver",
+                kind: .actionDriver,
+                description: "Low-level desktop clicks, typing, hotkeys, app launch, and scrolling.",
+                isEnabled: isCuaActionDriverEnabled
+            ),
+            TipTourConnection(
+                id: "hermes-orchestrator",
+                displayName: "Hermes",
+                kind: .orchestrator,
+                description: "Optional long-running reasoning, memory, skills, and external tool orchestration.",
+                isEnabled: isHermesOrchestratorEnabled
+            )
+        ]
+    }
+
     /// Privacy mode for Gemini Live visual context. When enabled, TipTour
     /// sends screen JPEGs to Gemini. When disabled, Gemini still hears the
     /// user and can call tools, but it does not receive screenshots.
@@ -771,6 +839,9 @@ final class CompanionManager: ObservableObject {
         // (autopilot).
         WorkflowRunner.shared.isAutopilotEnabledProvider = { [weak self] in
             self?.isAutopilotEnabled ?? false
+        }
+        ActionExecutor.shared.isActionDriverEnabledProvider = { [weak self] in
+            self?.isCuaActionDriverEnabled ?? false
         }
 
         // If the user already completed onboarding AND all permissions are

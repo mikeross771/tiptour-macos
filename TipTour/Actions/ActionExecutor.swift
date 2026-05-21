@@ -2,9 +2,8 @@
 //  ActionExecutor.swift
 //  TipTour
 //
-//  Autopilot execution layer. TipTour decides what should happen
-//  (Gemini tool call -> AX/box_2d resolution -> workflow state); CUA
-//  Driver Core handles the low-level macOS input delivery.
+//  Autopilot action facade. TipTour core depends on ActionExecutor;
+//  concrete action delivery lives behind TipTourActionDriver.
 //
 
 import AppKit
@@ -16,6 +15,7 @@ enum ActionExecutorError: Error, LocalizedError {
     case unparseableKeyboardShortcut(String)
     case invalidScrollDirection(String)
     case highlightedTextRangeUnavailable
+    case actionDriverDisabled(String)
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +27,8 @@ enum ActionExecutorError: Error, LocalizedError {
             return "Invalid scroll direction \"\(direction)\"."
         case .highlightedTextRangeUnavailable:
             return "The highlighted text range is no longer available."
+        case .actionDriverDisabled(let driverName):
+            return "\(driverName) action driver is disabled."
         }
     }
 }
@@ -34,7 +36,142 @@ enum ActionExecutorError: Error, LocalizedError {
 @MainActor
 final class ActionExecutor {
 
-    static let shared = ActionExecutor()
+    static let shared = ActionExecutor(actionDriver: CuaActionDriver())
+
+    private let actionDriver: TipTourActionDriver
+    var isActionDriverEnabledProvider: (@MainActor () -> Bool)?
+    var actionDriverDisplayName: String = "CUA"
+
+    init(actionDriver: TipTourActionDriver) {
+        self.actionDriver = actionDriver
+    }
+
+    func click(
+        atGlobalScreenPoint globalScreenPoint: CGPoint,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.click(
+            atGlobalScreenPoint: globalScreenPoint,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func rightClick(
+        atGlobalScreenPoint globalScreenPoint: CGPoint,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.rightClick(
+            atGlobalScreenPoint: globalScreenPoint,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func doubleClick(
+        atGlobalScreenPoint globalScreenPoint: CGPoint,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.doubleClick(
+            atGlobalScreenPoint: globalScreenPoint,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func pressKeyboardShortcut(
+        _ shortcutString: String,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.pressKeyboardShortcut(
+            shortcutString,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func pressKey(
+        _ keyName: String,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.pressKey(
+            keyName,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func typeText(
+        _ text: String,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.typeText(
+            text,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func setFocusedValue(
+        _ value: String,
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.setFocusedValue(
+            value,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func scroll(
+        direction: String,
+        amount: Int = 3,
+        by granularity: String = "line",
+        activatingTargetApp targetApp: NSRunningApplication? = nil
+    ) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.scroll(
+            direction: direction,
+            amount: amount,
+            by: granularity,
+            activatingTargetApp: targetApp
+        )
+    }
+
+    func openApplication(named applicationName: String) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.openApplication(named: applicationName)
+    }
+
+    func openURL(_ rawURLString: String, preferredApplicationName: String? = nil) async throws {
+        try ensureActionDriverEnabled()
+        try await actionDriver.openURL(
+            rawURLString,
+            preferredApplicationName: preferredApplicationName
+        )
+    }
+
+    func setPendingTextReplacementRange(
+        processIdentifier: pid_t,
+        location: Int,
+        length: Int
+    ) {
+        actionDriver.setPendingTextReplacementRange(
+            processIdentifier: processIdentifier,
+            location: location,
+            length: length
+        )
+    }
+
+    private func ensureActionDriverEnabled() throws {
+        guard isActionDriverEnabledProvider?() ?? true else {
+            throw ActionExecutorError.actionDriverDisabled(actionDriverDisplayName)
+        }
+    }
+}
+
+@MainActor
+final class CuaActionDriver: TipTourActionDriver {
 
     private let postActivationSettleSeconds: TimeInterval = 0.08
     private let postForegroundActivationSettleSeconds: TimeInterval = 0.35

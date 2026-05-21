@@ -472,9 +472,9 @@ final class WorkflowRunner: ObservableObject {
         activeStepResolutionTask?.cancel()
         activeStepResolutionTask = Task { [weak self] in
             guard let self else { return }
-            // After a real click, the UI is mid-transition (menu opening,
+            // After a real click, the UI is mid-transition (menu opening,r
             // sheet appearing). Instead of blindly sleeping, give it a
-            // very short nap to let the click register, then rely on the
+            // very short nap to let the click register, then rely on   the
             // AX-polling retry budget inside the resolve loop to catch
             // the next element the moment it appears.
             if isPostClick {

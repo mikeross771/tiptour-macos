@@ -64,6 +64,9 @@ struct CompanionPanelView: View {
                 accurateGroundingToggleRow
                     .padding(.horizontal, 16)
                 Spacer().frame(height: 6)
+                connectionsSection
+                    .padding(.horizontal, 16)
+                Spacer().frame(height: 6)
                 nekoModeToggleRow
                     .padding(.horizontal, 16)
             }
@@ -549,7 +552,7 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Neko Mode Toggle
+    // MARK: - Grounding Toggle
 
     private var accurateGroundingToggleRow: some View {
         HStack {
@@ -591,6 +594,85 @@ struct CompanionPanelView: View {
             .scaleEffect(0.8)
         }
         .padding(.vertical, 4)
+    }
+
+    // MARK: - Connections
+
+    private var connectionsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("CONNECTIONS")
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .tracking(0.4)
+                .foregroundColor(DS.Colors.textTertiary)
+
+            connectionToggleRow(
+                title: "CUA Driver",
+                subtitle: companionManager.isCuaActionDriverEnabled
+                    ? "desktop actions enabled"
+                    : "actions paused",
+                systemImage: "cursorarrow",
+                isOn: Binding(
+                    get: { companionManager.isCuaActionDriverEnabled },
+                    set: { companionManager.setCuaActionDriverEnabled($0) }
+                )
+            )
+
+            connectionToggleRow(
+                title: "Hermes",
+                subtitle: companionManager.isHermesOrchestratorEnabled
+                    ? "auto delegate long tasks"
+                    : "TipTour stays local",
+                systemImage: "link",
+                isOn: Binding(
+                    get: { companionManager.isHermesOrchestratorEnabled },
+                    set: { companionManager.setHermesOrchestratorEnabled($0) }
+                )
+            )
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+        )
+    }
+
+    private func connectionToggleRow(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isOn: Binding<Bool>
+    ) -> some View {
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isOn.wrappedValue ? DS.Colors.accent : DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(DS.Colors.textSecondary)
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundColor(DS.Colors.textTertiary)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .tint(DS.Colors.accent)
+                .scaleEffect(0.8)
+        }
+        .padding(.vertical, 3)
     }
 
     /// Whimsical toggle that swaps the blue triangle cursor for a

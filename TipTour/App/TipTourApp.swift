@@ -31,6 +31,7 @@ struct TipTourApp: App {
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
+    private var harnessServer: TipTourHarnessServer?
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -44,6 +45,9 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
         companionManager.start()
+        let harnessServer = TipTourHarnessServer(tipTourEngine: companionManager.tipTourEngine)
+        harnessServer.start()
+        self.harnessServer = harnessServer
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
@@ -58,6 +62,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        harnessServer?.stop()
         companionManager.stop()
     }
 
