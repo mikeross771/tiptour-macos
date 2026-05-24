@@ -27,6 +27,10 @@ struct WorkflowStep: Codable, Identifiable, Hashable {
     /// Human-readable label for the element, e.g. "File", "New",
     /// "General template". Passed to ElementResolver for pixel lookup.
     let label: String?
+    /// Exact local target chosen from LocalPerceptionTargetCache. This is
+    /// preferred over fuzzy label matching when a planner selects a mark.
+    let targetID: String?
+    let targetMark: Int?
     let value: String?
     let direction: String?
     let amount: Int?
@@ -239,6 +243,10 @@ private struct FlexiblePlanPayload: Codable {
         let element: String?
         let targetLabel: String?
         let target_label: String?
+        let targetID: String?
+        let target_id: String?
+        let targetMark: Int?
+        let target_mark: Int?
         let key: String?
         let shortcut: String?
         let hint: String?
@@ -265,6 +273,8 @@ private struct FlexiblePlanPayload: Codable {
                 id: s.id ?? "step_\(index + 1)",
                 type: WorkflowStep.StepType.normalized(from: s.type ?? s.action),
                 label: s.label ?? s.target ?? s.element ?? s.targetLabel ?? s.target_label ?? s.key ?? s.shortcut,
+                targetID: s.targetID ?? s.target_id,
+                targetMark: s.targetMark ?? s.target_mark,
                 value: s.value ?? s.text,
                 direction: s.direction,
                 amount: s.amount,

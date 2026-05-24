@@ -334,6 +334,10 @@ private struct HarnessWorkflowStepRequest: Decodable {
     let label: String?
     let targetLabel: String?
     let target_label: String?
+    let targetID: String?
+    let target_id: String?
+    let targetMark: Int?
+    let target_mark: Int?
     let key: String?
     let shortcut: String?
     let value: String?
@@ -359,6 +363,8 @@ private struct HarnessWorkflowStepRequest: Decodable {
             id: id ?? "harness_step_\(index + 1)",
             type: WorkflowStep.StepType.normalized(from: type ?? action),
             label: label ?? targetLabel ?? target_label ?? key ?? shortcut,
+            targetID: targetID ?? target_id,
+            targetMark: targetMark ?? target_mark,
             value: value ?? text,
             direction: direction,
             amount: amount,

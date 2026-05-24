@@ -87,6 +87,45 @@ final class ElementResolver: @unchecked Sendable {
         )
     }
 
+    func exactLocalTargetResolution(
+        targetID: String?,
+        targetMark: Int?,
+        fallbackLabel: String
+    ) -> Resolution? {
+        let targets = LocalPerceptionTargetCache.shared.currentTargets()
+        let matchedTarget: LocalPerceptionTargetCache.SnapshotTarget?
+        if let targetID = targetID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !targetID.isEmpty {
+            matchedTarget = targets.first(where: { $0.id == targetID })
+        } else if let targetMark {
+            matchedTarget = targets.first(where: { $0.mark == targetMark })
+        } else {
+            matchedTarget = nil
+        }
+
+        guard let matchedTarget,
+              matchedTarget.globalCenter.count >= 2,
+              matchedTarget.globalBox.count >= 4,
+              matchedTarget.displayFrame.count >= 4 else {
+            return nil
+        }
+
+        let globalScreenRect = Self.rect(from: matchedTarget.globalBox)
+        let displayFrame = Self.rect(from: matchedTarget.displayFrame)
+        let label = matchedTarget.label.isEmpty ? fallbackLabel : matchedTarget.label
+        print("[ElementResolver] ✓ exact local target #\(matchedTarget.mark) \"\(label)\" [\(matchedTarget.source)] at \(matchedTarget.globalCenter)")
+        return Resolution(
+            globalScreenPoint: CGPoint(
+                x: matchedTarget.globalCenter[0],
+                y: matchedTarget.globalCenter[1]
+            ),
+            displayFrame: displayFrame,
+            label: label,
+            source: .localPerceptionCache,
+            globalScreenRect: globalScreenRect
+        )
+    }
+
     /// Absolute last resort — use Gemini's raw box_2d coordinate as-is.
     func rawLLMCoordinate(
         label: String,
@@ -311,6 +350,15 @@ final class ElementResolver: @unchecked Sendable {
             label: target.label,
             source: .localPerceptionCache,
             globalScreenRect: target.globalScreenRect
+        )
+    }
+
+    private static func rect(from array: [Double]) -> CGRect {
+        CGRect(
+            x: array[0],
+            y: array[1],
+            width: max(0, array[2] - array[0]),
+            height: max(0, array[3] - array[1])
         )
     }
 
