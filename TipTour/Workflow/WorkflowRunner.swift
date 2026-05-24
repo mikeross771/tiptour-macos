@@ -612,6 +612,20 @@ final class WorkflowRunner: ObservableObject {
         var latestAllCaptures = allScreenCaptures
         var attemptIndex = 0
 
+        if let exactLocalResolution = ElementResolver.shared.exactLocalTargetResolution(
+            targetID: activeStep?.targetID,
+            targetMark: activeStep?.targetMark,
+            fallbackLabel: label
+        ) {
+            armCursorAndClickDetector(
+                with: exactLocalResolution,
+                pickingFrom: latestAllCaptures,
+                stepType: activeStep?.type ?? .click,
+                operationToken: operationToken
+            )
+            return
+        }
+
         while Date() < deadline {
             if Task.isCancelled { return }
             if operationToken != currentOperationToken { return }

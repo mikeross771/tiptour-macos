@@ -153,6 +153,8 @@ struct ClaudeActionPlannerClient {
         {
           "type": "click | rightClick | doubleClick | openApp | openURL | keyboardShortcut | pressKey | type | setValue | scroll | observe",
           "label": "visible target label, app name, key, shortcut, or text",
+          "target_id": "exact id from the local target list when clicking a visible target",
+          "target_mark": 12,
           "value": "text, URL, or shortcut value when needed",
           "targetContext": "visibleElement | currentHighlight | currentSelection | focusedElement",
           "hint": "short action hint"
@@ -162,7 +164,7 @@ struct ClaudeActionPlannerClient {
 
     Rules:
     - Emit exactly one step. TipTour will observe the result and ask again if more work remains.
-    - Prefer visible local target labels from the target list when clicking.
+    - Prefer visible local targets from the target list when clicking. If a listed target is the intended target, include its exact target_id and target_mark.
     - For menus, click the next visible menu item only. Do not skip ahead to submenu items that are not visible yet.
     - keyboardShortcut labels must be literal shortcuts like Cmd+A or Cmd+Shift+F. Never use semantic names like Select All, Copy, Paste, or Delete as keyboardShortcut labels.
     - pressKey labels must be one physical key like A, X, Delete, Return, or Escape.
