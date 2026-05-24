@@ -253,17 +253,24 @@ final class TipTourEngine {
             )
         }
 
-        guard let matchedTarget = explicitTarget(
+        let didRequestExactTarget = didRequestExplicitTarget(
+            targetID: pointerActionRequest.targetID,
+            targetMark: pointerActionRequest.targetMark
+        )
+        let explicitlyMatchedTarget = explicitTarget(
             requestedTargetID: pointerActionRequest.targetID,
             requestedTargetMark: pointerActionRequest.targetMark,
             targets: targets
-        ) ?? bestTarget(
+        )
+        let matchedTarget = explicitlyMatchedTarget ?? (didRequestExactTarget ? nil : bestTarget(
             requestedLabel: pointerActionRequest.targetLabel,
             goal: pointerActionRequest.goal,
             targets: targets,
             app: pointerActionRequest.app,
             excludingTargetIDs: []
-        ) else {
+        ))
+
+        guard let matchedTarget else {
             let reason = pointerActionRequest.allowScreenshotPlanning ? "needs_screenshot_planner" : "target_not_found"
             let message = pointerActionRequest.allowScreenshotPlanning
                 ? "No local target matched. Screenshot planning can be added here, but this endpoint currently refuses to guess raw coordinates."
@@ -407,6 +414,14 @@ final class TipTourEngine {
             ignoredSteps: ignoredSteps,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
         )
+    }
+
+    private func didRequestExplicitTarget(targetID: String?, targetMark: Int?) -> Bool {
+        if let targetID = targetID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !targetID.isEmpty {
+            return true
+        }
+        return targetMark != nil
     }
 
     private func explicitTarget(
