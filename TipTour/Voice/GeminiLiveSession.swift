@@ -230,6 +230,7 @@ final class GeminiLiveSession: ObservableObject {
         isActive = true
         inputTranscript = ""
         hasReceivedUserSpeechThisSession = false
+        didSendStateSyncScreenshotForCurrentUserTurn = false
 
         startPeriodicScreenshotUpdates()
 
@@ -252,6 +253,7 @@ final class GeminiLiveSession: ObservableObject {
 
         stopPeriodicScreenshotUpdates()
         hasReceivedUserSpeechThisSession = false
+        didSendStateSyncScreenshotForCurrentUserTurn = false
         stopMicCapture()
         // Player detach happened inside stopMicCapture; clear any
         // residual buffered audio so it doesn't replay on next session.
@@ -262,19 +264,6 @@ final class GeminiLiveSession: ObservableObject {
         isModelSpeaking = false
         print("[GeminiLiveSession] Session stopped")
     }
-
-    // MARK: - Narration Mode
-    //
-    // Narration mode is entered once `submit_workflow_plan` has been
-    // accepted and the local runner owns the plan. We stop streaming
-    // mic audio and screenshots (both risk feeding Gemini noise that
-    // triggers interrupts), but keep the WebSocket + audio playback
-    // alive so we can push a single-sentence text per step and hear
-    // Gemini speak it in the same voice the user just heard.
-
-    /// True while we've paused mic+screenshot streaming but still have
-    /// a live socket for text-driven narration.
-    private(set) var isInNarrationMode: Bool = false
 
     /// True after a successful tool call until the user speaks again.
     /// While this is set, `captureAndProcessFrameForGemini` skips the
@@ -294,23 +283,7 @@ final class GeminiLiveSession: ObservableObject {
     /// are visual context, not user prompts; gating text-only mark sends
     /// behind real speech prevents Gemini from speaking first on connect.
     private var hasReceivedUserSpeechThisSession = false
-
-    /// Pause mic capture and periodic screenshots while keeping the
-    /// WebSocket and audio player alive. Use this while Gemini is
-    /// speaking a post-tool-call narration so its own speech doesn't
-    /// leak through the mic or get interrupted by stray screenshots.
-    func enterNarrationMode() {
-        guard isActive else { return }
-        guard !isInNarrationMode else { return }
-        stopPeriodicScreenshotUpdates()
-        // Pause ONLY the mic tap. Engine + attached player keep running
-        // so the model's narration audio still plays. Calling
-        // stopMicCapture() here detached the player and dropped every
-        // narration audio chunk on the floor.
-        pauseMicTapForNarration()
-        isInNarrationMode = true
-        print("[GeminiLiveSession] Narration mode entered (mic paused, audio playback alive)")
-    }
+    private var didSendStateSyncScreenshotForCurrentUserTurn = false
 
     /// Mark that a tool call was just satisfied, so subsequent
     /// screenshot pushes should be suppressed until the user speaks.
@@ -334,57 +307,33 @@ final class GeminiLiveSession: ObservableObject {
         print("[GeminiLiveSession] 🔊 screenshot suppression cleared")
     }
 
-    /// Resume mic capture + periodic screenshots after narration
-    /// finishes. The WebSocket stays open so Gemini's conversational
-    /// memory of the current session carries over — user can ask
-    /// follow-up questions ("and now save it?") and Gemini remembers
-    /// everything said on this socket.
-    func exitNarrationMode() {
-        guard isActive else { return }
-        guard isInNarrationMode else { return }
-        do {
-            try resumeMicTapAfterNarration()
-        } catch {
-            print("[GeminiLiveSession] Failed to resume mic after narration: \(error)")
-        }
-        startPeriodicScreenshotUpdates()
-        isInNarrationMode = false
-        print("[GeminiLiveSession] Narration mode exited (mic resumed)")
-    }
-
-    /// Remove ONLY the mic tap, leaving the engine + attached player
-    /// running so the model's narration audio still plays back.
-    private func pauseMicTapForNarration() {
-        if isAudioTapInstalled {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            isAudioTapInstalled = false
-        }
-        currentAudioPowerLevel = 0
-    }
-
-    /// Re-install the mic tap on the still-running engine. Doesn't touch
-    /// the engine lifecycle or the player attachment.
-    private func resumeMicTapAfterNarration() throws {
-        guard !isAudioTapInstalled else { return }
-        let inputNode = audioEngine.inputNode
-        let inputFormat = inputNode.inputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-            throw NSError(domain: "GeminiLiveSession", code: -21,
-                          userInfo: [NSLocalizedDescriptionKey: "Mic format invalid on resume — sample rate \(inputFormat.sampleRate)"])
-        }
-        installMicTap(inputNode: inputNode, inputFormat: inputFormat)
-        if !audioEngine.isRunning {
-            audioEngine.prepare()
-            try audioEngine.start()
-        }
-    }
-
     /// Send a text input to Gemini — kept around for future use (e.g.
-    /// programmatic questions or context injection). Not used by the
-    /// current one-shot narration flow.
+    /// programmatic questions or context injection).
     func sendText(_ text: String) {
         guard isActive else { return }
         geminiClient.sendText(text)
+    }
+
+    /// Capture and send one fresh frame for an explicit user gesture, such
+    /// as a committed focus highlight. This bypasses scene-deduplication
+    /// and post-action screenshot suppression because the user is asking
+    /// the model to look at a specific region now.
+    func sendFreshScreenshotForUserContext() async -> CompanionScreenCapture? {
+        guard isActive, isScreenshotStreamingEnabled else {
+            return latestCapture
+        }
+
+        guard let screenshots = try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG(),
+              let primaryCapture = screenshots.first else {
+            return latestCapture
+        }
+
+        latestCapture = primaryCapture
+        if let newHash = ScreenshotPerceptualHash.perceptualHash(forJPEGData: primaryCapture.imageData) {
+            lastSentScreenshotHashByScreenLabel[primaryCapture.label] = newHash
+        }
+        geminiClient.sendScreenshot(primaryCapture.imageData)
+        return primaryCapture
     }
 
     // MARK: - Push-To-Talk Mic Gating
@@ -596,6 +545,17 @@ final class GeminiLiveSession: ObservableObject {
         geminiClient.sendScreenshot(jpegData)
     }
 
+    private func sendCurrentStateScreenshotForUserTurnIfNeeded() {
+        guard isActive, isScreenshotStreamingEnabled else { return }
+        guard !didSendStateSyncScreenshotForCurrentUserTurn else { return }
+
+        didSendStateSyncScreenshotForCurrentUserTurn = true
+        invalidateScreenshotHashCache()
+        Task { @MainActor [weak self] in
+            await self?.captureAndProcessFrameForGemini()
+        }
+    }
+
     // MARK: - API Key Fetch
 
     /// Resolve the Gemini API key. Source builds use only the user's
@@ -687,9 +647,7 @@ final class GeminiLiveSession: ObservableObject {
         print("[GeminiLiveSession] Mic capture started")
     }
 
-    /// Install the mic tap on the given input node. Factored out so
-    /// `resumeMicTapAfterNarration` can reuse it without rebuilding the
-    /// engine or detaching the player.
+    /// Install the mic tap on the given input node.
     private func installMicTap(inputNode: AVAudioInputNode, inputFormat: AVAudioFormat) {
         // CRITICAL: this callback runs on a real-time audio thread ~40x/sec.
         // Never block it and never hop to the main actor from inside — both
@@ -786,6 +744,7 @@ final class GeminiLiveSession: ObservableObject {
                     print("[GeminiLiveSession] 🔊 user spoke — screenshot streaming remains disabled")
                 }
             }
+            sendCurrentStateScreenshotForUserTurnIfNeeded()
 
         case .outputTranscript:
             // Output transcript is only useful for debugging now that the
@@ -801,6 +760,7 @@ final class GeminiLiveSession: ObservableObject {
             onTurnComplete?()
             // Reset transcripts so the next turn starts fresh.
             inputTranscript = ""
+            didSendStateSyncScreenshotForCurrentUserTurn = false
             toolCallsThisTurn = 0
 
         case .interrupted:

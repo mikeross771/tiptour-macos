@@ -5,7 +5,7 @@
 //  Listens for global left-mouse-down events and fires a callback if
 //  the click lands inside (or within a small tolerance of) the currently
 //  armed target. Used by WorkflowRunner to auto-advance the workflow
-//  checklist when the user clicks the element the cursor is pointing at.
+//  action when the user clicks the element the cursor is pointing at.
 //
 //  Deliberately minimal:
 //    • One armed target at a time (replaces the previous one).
@@ -43,12 +43,6 @@ final class ClickDetector {
     /// double-click on the current step flow through to the app without
     /// racing into whatever target we arm next.
     private let postHitGraceIntervalInSeconds: TimeInterval = 0.18
-
-    /// Debug: when true, ANY left-click advances the workflow — both the
-    /// distance and rect checks are bypassed. Useful for walking through
-    /// a plan when YOLO/AX resolves the wrong element so the user can
-    /// still progress.
-    static var advanceOnAnyClickEnabled: Bool = false
 
     /// The target the user is expected to click next, in global AppKit
     /// screen coordinates. Nil means nothing is armed — clicks are
@@ -192,14 +186,9 @@ final class ClickDetector {
         let isWithinPointRadius = armedTargetRectInGlobalScreenCoordinates == nil
             && distanceFromPoint <= pointOnlyHitToleranceInScreenPoints
 
-        let shouldFireDueToDebugBypass = Self.advanceOnAnyClickEnabled
-        let shouldFire = isWithinRect || isWithinPointRadius || shouldFireDueToDebugBypass
+        let shouldFire = isWithinRect || isWithinPointRadius
 
-        let isDebugBypassMiss = shouldFireDueToDebugBypass && !isWithinRect && !isWithinPointRadius
-        let debugSuffix = isDebugBypassMiss
-            ? " [debug: advancing anyway — cursor was off by \(Int(distanceFromPoint))pt, indicates a resolution accuracy issue]"
-            : ""
-        print("[ClickDetector] click at \(clickPointInGlobalScreenCoordinates) — rectHit=\(isWithinRect) pointHit=\(isWithinPointRadius) dist=\(Int(distanceFromPoint))pt\(debugSuffix)")
+        print("[ClickDetector] click at \(clickPointInGlobalScreenCoordinates) — rectHit=\(isWithinRect) pointHit=\(isWithinPointRadius) dist=\(Int(distanceFromPoint))pt")
 
         guard shouldFire else { return }
 

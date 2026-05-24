@@ -8,6 +8,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
 
     struct SnapshotTarget: Encodable {
         let id: String
+        let mark: Int
         let label: String
         let source: String
         let confidence: Double
@@ -105,16 +106,11 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
             )
         }
 
-        let matchedCandidate = bestCandidate(
+        guard let matchedCandidate = bestCandidate(
             matching: label,
             candidates: currentSnapshot.candidates,
             proximityAnchorInScreenshotPixels: proximityAnchorInScreenshotPixels
-        ) ?? nearestCandidate(
-            to: pointHintInScreenshotPixels,
-            candidates: currentSnapshot.candidates
-        )
-
-        guard let matchedCandidate else {
+        ) else {
             return nil
         }
 
@@ -157,7 +153,8 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
                 return first.source == "ocr"
             }
             .prefix(limit)
-            .map { candidate in
+            .enumerated()
+            .map { index, candidate in
                 let globalRect = screenshotPixelRectToGlobalScreen(
                     candidate.screenshotRect,
                     imageSize: currentSnapshot.imageSize,
@@ -165,6 +162,7 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
                 )
                 return SnapshotTarget(
                     id: targetID(for: candidate),
+                    mark: index + 1,
                     label: candidate.label,
                     source: candidate.source,
                     confidence: candidate.confidence,
@@ -304,38 +302,6 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         return scoredCandidates.max { $0.score < $1.score }?.candidate
     }
 
-    private func nearestCandidate(
-        to pointHintInScreenshotPixels: CGPoint?,
-        candidates: [Candidate]
-    ) -> Candidate? {
-        guard let pointHintInScreenshotPixels else { return nil }
-
-        let candidatesWithDistances = candidates
-            .filter { $0.screenshotRect.width > 8 && $0.screenshotRect.height > 8 }
-            .map { candidate -> (candidate: Candidate, distance: CGFloat) in
-                let distance = distance(from: pointHintInScreenshotPixels, to: candidate.screenshotRect)
-                return (candidate, distance)
-            }
-            .sorted { first, second in
-                if first.distance == second.distance {
-                    return first.candidate.screenshotRect.area < second.candidate.screenshotRect.area
-                }
-                return first.distance < second.distance
-            }
-
-        guard let nearest = candidatesWithDistances.first else { return nil }
-
-        // A normalized point_2d is usually exact. Keep this fallback
-        // tight so an icon-only toolbar control can resolve, but a
-        // far-away stale point cannot snap to a random box.
-        let maximumPointSnapDistance: CGFloat = 44
-        guard nearest.distance <= maximumPointSnapDistance else {
-            return nil
-        }
-
-        return nearest.candidate
-    }
-
     private func labelMatchScore(query: String, label: String) -> Double? {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -360,6 +326,10 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
             .intersection(normalizedLabel.words)
             .filter { $0.count >= minimumSubstringLength }
         guard !sharedWords.isEmpty else { return nil }
+        if normalizedQuery.words.count > 1,
+           sharedWords.count < normalizedQuery.words.count {
+            return nil
+        }
 
         let coverage = Double(sharedWords.count) / Double(max(normalizedQuery.words.count, 1))
         if coverage >= 1.0 { return 58 }

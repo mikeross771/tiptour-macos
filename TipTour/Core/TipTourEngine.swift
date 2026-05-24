@@ -32,6 +32,21 @@ struct TipTourEngineObservation: Encodable {
     let detectionElementCount: Int
 }
 
+struct TipTourEngineSkillList: Encodable {
+    let ok: Bool
+    let activeAppName: String?
+    let activeBundleIdentifier: String?
+    let skillCount: Int
+    let skills: [MarkdownAppSkillInfo]
+}
+
+struct TipTourEngineActiveSkill: Encodable {
+    let ok: Bool
+    let activeAppName: String?
+    let activeBundleIdentifier: String?
+    let skill: MarkdownAppSkillInfo?
+}
+
 struct TipTourEngineTargetList: Encodable {
     let ok: Bool
     let refreshed: Bool
@@ -44,6 +59,8 @@ struct TipTourEngineTargetList: Encodable {
 struct TipTourEnginePlannedActionStep: Encodable {
     let type: String
     let label: String
+    let targetID: String
+    let targetMark: Int
     let hint: String
     let box2D: [Int]
     let matchedSource: String
@@ -96,7 +113,6 @@ struct TipTourEnginePlanNextActionResult: Encodable {
 @MainActor
 final class TipTourEngine {
     private let isAutopilotEnabledProvider: () -> Bool
-    private let isMultiStepTourGuideEnabledProvider: () -> Bool
     private let isScreenshotStreamingEnabledProvider: () -> Bool
     private let isAccurateGroundingEnabledProvider: () -> Bool
     private let isCuaActionDriverEnabledProvider: () -> Bool
@@ -111,7 +127,6 @@ final class TipTourEngine {
 
     init(
         isAutopilotEnabledProvider: @escaping () -> Bool,
-        isMultiStepTourGuideEnabledProvider: @escaping () -> Bool,
         isScreenshotStreamingEnabledProvider: @escaping () -> Bool,
         isAccurateGroundingEnabledProvider: @escaping () -> Bool,
         isCuaActionDriverEnabledProvider: @escaping () -> Bool,
@@ -122,7 +137,6 @@ final class TipTourEngine {
         startWorkflowPlan: @escaping (WorkflowPlan) -> Void
     ) {
         self.isAutopilotEnabledProvider = isAutopilotEnabledProvider
-        self.isMultiStepTourGuideEnabledProvider = isMultiStepTourGuideEnabledProvider
         self.isScreenshotStreamingEnabledProvider = isScreenshotStreamingEnabledProvider
         self.isAccurateGroundingEnabledProvider = isAccurateGroundingEnabledProvider
         self.isCuaActionDriverEnabledProvider = isCuaActionDriverEnabledProvider
@@ -173,6 +187,28 @@ final class TipTourEngine {
         )
     }
 
+    func skills() -> TipTourEngineSkillList {
+        let activeApp = NSWorkspace.shared.frontmostApplication
+        let skillInfos = MarkdownAppSkillRegistry.shared.skillInfos(activeApplication: activeApp)
+        return TipTourEngineSkillList(
+            ok: true,
+            activeAppName: activeApp?.localizedName,
+            activeBundleIdentifier: activeApp?.bundleIdentifier,
+            skillCount: skillInfos.count,
+            skills: skillInfos
+        )
+    }
+
+    func activeSkill() -> TipTourEngineActiveSkill {
+        let activeApp = NSWorkspace.shared.frontmostApplication
+        return TipTourEngineActiveSkill(
+            ok: true,
+            activeAppName: activeApp?.localizedName,
+            activeBundleIdentifier: activeApp?.bundleIdentifier,
+            skill: MarkdownAppSkillRegistry.shared.activeSkillInfo(for: activeApp)
+        )
+    }
+
     func planNextAction(
         goal: String,
         app: String?,
@@ -182,6 +218,22 @@ final class TipTourEngine {
         allowScreenshotPlanning: Bool,
         validateStateChange: Bool
     ) async -> TipTourEnginePlanNextActionResult {
+        let pointerActionRequest = PointerActionRequest(
+            goal: goal,
+            app: app,
+            actionType: requestedActionType,
+            targetLabel: requestedTargetLabel,
+            targetID: nil,
+            targetMark: nil,
+            execute: execute,
+            allowScreenshotPlanning: allowScreenshotPlanning,
+            validateStateChange: validateStateChange
+        )
+        return await runPointerAction(pointerActionRequest)
+    }
+
+    func runPointerAction(_ pointerActionRequest: PointerActionRequest) async -> TipTourEnginePlanNextActionResult {
+        await activateRequestedApplicationForPerceptionIfNeeded(pointerActionRequest.app)
         await refreshLocalPerception("harness plan-next-action")
 
         let targets = LocalPerceptionTargetCache.shared.currentTargets()
@@ -201,14 +253,19 @@ final class TipTourEngine {
             )
         }
 
-        guard let matchedTarget = bestTarget(
-            requestedLabel: requestedTargetLabel,
-            goal: goal,
+        guard let matchedTarget = explicitTarget(
+            requestedTargetID: pointerActionRequest.targetID,
+            requestedTargetMark: pointerActionRequest.targetMark,
+            targets: targets
+        ) ?? bestTarget(
+            requestedLabel: pointerActionRequest.targetLabel,
+            goal: pointerActionRequest.goal,
             targets: targets,
+            app: pointerActionRequest.app,
             excludingTargetIDs: []
         ) else {
-            let reason = allowScreenshotPlanning ? "needs_screenshot_planner" : "target_not_found"
-            let message = allowScreenshotPlanning
+            let reason = pointerActionRequest.allowScreenshotPlanning ? "needs_screenshot_planner" : "target_not_found"
+            let message = pointerActionRequest.allowScreenshotPlanning
                 ? "No local target matched. Screenshot planning can be added here, but this endpoint currently refuses to guess raw coordinates."
                 : "No local target matched the requested label or goal."
             return TipTourEnginePlanNextActionResult(
@@ -227,11 +284,11 @@ final class TipTourEngine {
         }
 
         let plannedStep = plannedActionStep(
-            actionType: requestedActionType,
+            actionType: pointerActionRequest.actionType,
             target: matchedTarget
         )
 
-        guard execute else {
+        guard pointerActionRequest.execute else {
             return TipTourEnginePlanNextActionResult(
                 ok: true,
                 reason: nil,
@@ -247,14 +304,13 @@ final class TipTourEngine {
             )
         }
 
-        let executionResult = await executeGroundedActionWithOneRepair(
-            goal: goal,
-            app: app,
-            requestedActionType: requestedActionType,
-            requestedTargetLabel: requestedTargetLabel,
+        let executionResult = await executeGroundedActionOnce(
+            goal: pointerActionRequest.goal,
+            app: pointerActionRequest.app,
+            requestedActionType: pointerActionRequest.actionType,
             initialTarget: matchedTarget,
             initialTargets: targets,
-            requireStateChange: validateStateChange
+            requireStateChange: pointerActionRequest.validateStateChange
         )
 
         return TipTourEnginePlanNextActionResult(
@@ -273,7 +329,7 @@ final class TipTourEngine {
     }
 
     func submitSingleActionWorkflowPlan(_ plan: WorkflowPlan) -> TipTourEngineSubmissionResult {
-        guard isAutopilotEnabledProvider() || isMultiStepTourGuideEnabledProvider() else {
+        guard isAutopilotEnabledProvider() else {
             return TipTourEngineSubmissionResult(
                 ok: false,
                 reason: "autopilot_disabled",
@@ -295,6 +351,8 @@ final class TipTourEngine {
             )
         }
 
+        activateRunningApplicationForWorkflowIfNeeded(plan.app)
+
         if let activePlan = WorkflowRunner.shared.activePlan {
             print("[Engine] superseding active plan \"\(activePlan.goal)\" with \"\(plan.goal)\"")
             WorkflowRunner.shared.stop()
@@ -303,7 +361,9 @@ final class TipTourEngine {
         let normalizedSteps = normalizeWorkflowSteps(
             plan.steps,
             plan.app ?? ""
-        )
+        ).map { step in
+            stepWithHarnessDefaults(step, planGoal: plan.goal, appName: plan.app)
+        }
         guard let firstStep = normalizedSteps.first else {
             return TipTourEngineSubmissionResult(
                 ok: false,
@@ -311,6 +371,17 @@ final class TipTourEngine {
                 message: "Workflow plan must contain at least one step.",
                 acceptedSteps: 0,
                 ignoredSteps: 0,
+                activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+            )
+        }
+
+        if let invalidReason = invalidSingleActionReason(for: firstStep) {
+            return TipTourEngineSubmissionResult(
+                ok: false,
+                reason: invalidReason,
+                message: "Workflow step is missing the required payload for \(firstStep.type.rawValue).",
+                acceptedSteps: 0,
+                ignoredSteps: normalizedSteps.count,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
             )
         }
@@ -325,7 +396,7 @@ final class TipTourEngine {
             print("[Engine] single-action mode: ignoring \(ignoredSteps) extra step(s)")
         }
 
-        print("[Engine] accepted workflow plan \"\(singleActionPlan.goal)\" -> \(firstStep.label ?? "<unlabeled>")")
+        print("[Engine] accepted workflow plan \"\(singleActionPlan.goal)\" -> \(firstStep.label ?? firstStep.value ?? "<unlabeled>")")
         startWorkflowPlan(singleActionPlan)
 
         return TipTourEngineSubmissionResult(
@@ -338,13 +409,38 @@ final class TipTourEngine {
         )
     }
 
+    private func explicitTarget(
+        requestedTargetID: String?,
+        requestedTargetMark: Int?,
+        targets: [LocalPerceptionTargetCache.SnapshotTarget]
+    ) -> LocalPerceptionTargetCache.SnapshotTarget? {
+        if let requestedTargetID = requestedTargetID?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !requestedTargetID.isEmpty,
+           let target = targets.first(where: { $0.id == requestedTargetID }) {
+            return target
+        }
+
+        if let requestedTargetMark,
+           requestedTargetMark > 0,
+           let target = targets.first(where: { $0.mark == requestedTargetMark }) {
+            return target
+        }
+
+        return nil
+    }
+
     private func bestTarget(
         requestedLabel: String?,
         goal: String,
         targets: [LocalPerceptionTargetCache.SnapshotTarget],
+        app: String?,
         excludingTargetIDs: Set<String>
     ) -> LocalPerceptionTargetCache.SnapshotTarget? {
-        let availableTargets = targets.filter { !excludingTargetIDs.contains($0.id) }
+        let availableTargets = targetsForGoalContext(
+            targets.filter { !excludingTargetIDs.contains($0.id) },
+            goal: goal,
+            app: app
+        )
         guard !availableTargets.isEmpty else { return nil }
 
         let query = requestedLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -365,6 +461,252 @@ final class TipTourEngine {
             }
             .max { $0.score < $1.score }?
             .target
+    }
+
+    private func stepWithHarnessDefaults(
+        _ step: WorkflowStep,
+        planGoal: String,
+        appName: String?
+    ) -> WorkflowStep {
+        switch step.type {
+        case .type:
+            guard (step.value?.isEmpty == false) || (step.label?.isEmpty == false) else {
+                guard let inferredText = inferredTextToType(from: planGoal) else { return step }
+                return replacingStepPayload(step, label: step.label, value: inferredText)
+            }
+            return step
+        case .pressKey:
+            guard step.label?.isEmpty != false else { return step }
+            guard let inferredKey = inferredKeyToPress(from: planGoal, appName: appName) else { return step }
+            return replacingStepPayload(step, label: inferredKey, value: step.value)
+        case .keyboardShortcut:
+            guard step.label?.isEmpty != false else { return step }
+            guard let inferredShortcut = inferredKeyboardShortcut(from: planGoal) else { return step }
+            return replacingStepPayload(step, label: inferredShortcut, value: step.value)
+        default:
+            return step
+        }
+    }
+
+    private func invalidSingleActionReason(for step: WorkflowStep) -> String? {
+        switch step.type {
+        case .type:
+            return ((step.value ?? step.label)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? nil
+                : "type_text_missing"
+        case .pressKey:
+            return (step.label?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? nil
+                : "press_key_missing"
+        case .keyboardShortcut:
+            return (step.label?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? nil
+                : "keyboard_shortcut_missing"
+        case .openApp, .openURL, .setValue:
+            return ((step.value ?? step.label)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+                ? nil
+                : "\(step.type.rawValue)_payload_missing"
+        default:
+            return nil
+        }
+    }
+
+    private func inferredTextToType(from goal: String) -> String? {
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedGoal = trimmedGoal.lowercased()
+        for prefix in ["type ", "enter ", "input ", "write "] {
+            guard lowercasedGoal.hasPrefix(prefix) else { continue }
+            let startIndex = trimmedGoal.index(trimmedGoal.startIndex, offsetBy: prefix.count)
+            let inferredText = String(trimmedGoal[startIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return inferredText.isEmpty ? nil : inferredText
+        }
+        return nil
+    }
+
+    private func inferredKeyToPress(from goal: String, appName: String?) -> String? {
+        let normalizedGoal = normalizedCommandText(goal)
+
+        if let activeSkill = skillForAppHint(appName),
+           let skillCommandAlias = activeSkill.commandAlias(for: goal),
+           skillCommandAlias.type == .pressKey {
+            return skillCommandAlias.label
+        }
+
+        if normalizedGoal.contains("confirm") || normalizedGoal.contains("apply") || normalizedGoal == "enter" {
+            return "Return"
+        }
+        if normalizedGoal.contains("escape") || normalizedGoal.contains("cancel") {
+            return "Escape"
+        }
+
+        return nil
+    }
+
+    private func inferredKeyboardShortcut(from goal: String) -> String? {
+        switch normalizedCommandText(goal) {
+        case "selectall":
+            return "Cmd+A"
+        case "copy":
+            return "Cmd+C"
+        case "paste":
+            return "Cmd+V"
+        case "cut":
+            return "Cmd+X"
+        case "undo":
+            return "Cmd+Z"
+        case "redo":
+            return "Cmd+Shift+Z"
+        default:
+            return nil
+        }
+    }
+
+    private func replacingStepPayload(
+        _ step: WorkflowStep,
+        label: String?,
+        value: String?
+    ) -> WorkflowStep {
+        WorkflowStep(
+            id: step.id,
+            type: step.type,
+            label: label,
+            value: value,
+            direction: step.direction,
+            amount: step.amount,
+            by: step.by,
+            targetContext: step.targetContext,
+            hint: step.hint,
+            hintX: step.hintX,
+            hintY: step.hintY,
+            box2DNormalized: step.box2DNormalized,
+            screenNumber: step.screenNumber
+        )
+    }
+
+    private func targetsForGoalContext(
+        _ targets: [LocalPerceptionTargetCache.SnapshotTarget],
+        goal: String,
+        app: String?
+    ) -> [LocalPerceptionTargetCache.SnapshotTarget] {
+        let normalizedGoal = normalizedCommandText(goal)
+        let isChoosingFromMenu = normalizedGoal.contains("submenu")
+            || normalizedGoal.contains("menuitem")
+            || normalizedGoal.contains("dropdown")
+            || normalizedGoal.contains("popover")
+            || normalizedGoal.contains("frommenu")
+
+        guard isChoosingFromMenu else { return targets }
+        guard let activeSkill = skillForAppHint(app),
+              let maximumNormalizedX = activeSkill.menuSelectionPreferredLeftRegionMaxX else {
+            return targets
+        }
+
+        let filteredTargets = targets.filter { target in
+            guard target.globalCenter.count >= 2,
+                  target.displayFrame.count >= 4 else {
+                return true
+            }
+
+            let centerX = target.globalCenter[0]
+            let displayMinX = target.displayFrame[0]
+            let displayMaxX = target.displayFrame[2]
+            let displayWidth = max(1, displayMaxX - displayMinX)
+            let normalizedX = (centerX - displayMinX) / displayWidth
+
+            return normalizedX < maximumNormalizedX
+        }
+
+        return filteredTargets.isEmpty ? targets : filteredTargets
+    }
+
+    private func skillForAppHint(_ appName: String?) -> MarkdownAppSkill? {
+        MarkdownAppSkillRegistry.shared.skill(applicationName: appName)
+            ?? MarkdownAppSkillRegistry.shared.skill(for: NSWorkspace.shared.frontmostApplication)
+    }
+
+    private func normalizedCommandText(_ text: String) -> String {
+        text
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+
+    private func activateRequestedApplicationForPerceptionIfNeeded(_ applicationNameOrBundleIdentifier: String?) async {
+        guard let applicationNameOrBundleIdentifier = applicationNameOrBundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !applicationNameOrBundleIdentifier.isEmpty else {
+            return
+        }
+
+        if let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+           Self.application(frontmostApplication, matches: applicationNameOrBundleIdentifier) {
+            return
+        }
+
+        let runningApplication = NSWorkspace.shared.runningApplications.first {
+            Self.application($0, matches: applicationNameOrBundleIdentifier)
+        }
+
+        if let runningApplication {
+            runningApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            return
+        }
+
+        guard let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: applicationNameOrBundleIdentifier) ??
+                NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.commonBundleIdentifier(for: applicationNameOrBundleIdentifier) ?? "") else {
+            print("[Engine] target app \"\(applicationNameOrBundleIdentifier)\" is not running and could not be found for perception activation")
+            return
+        }
+
+        do {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            let launchedApplication = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
+            launchedApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            try? await Task.sleep(nanoseconds: 520_000_000)
+        } catch {
+            print("[Engine] failed to activate \"\(applicationNameOrBundleIdentifier)\" before perception refresh: \(error.localizedDescription)")
+        }
+    }
+
+    private static func application(_ runningApplication: NSRunningApplication, matches requestedNameOrBundleIdentifier: String) -> Bool {
+        let normalizedRequestedValue = requestedNameOrBundleIdentifier.lowercased()
+        return runningApplication.bundleIdentifier?.lowercased() == normalizedRequestedValue
+            || runningApplication.localizedName?.lowercased() == normalizedRequestedValue
+    }
+
+    private func activateRunningApplicationForWorkflowIfNeeded(_ applicationNameOrBundleIdentifier: String?) {
+        guard let applicationNameOrBundleIdentifier = applicationNameOrBundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !applicationNameOrBundleIdentifier.isEmpty else {
+            return
+        }
+
+        if let frontmostApplication = NSWorkspace.shared.frontmostApplication,
+           Self.application(frontmostApplication, matches: applicationNameOrBundleIdentifier) {
+            return
+        }
+
+        let runningApplication = NSWorkspace.shared.runningApplications.first {
+            Self.application($0, matches: applicationNameOrBundleIdentifier)
+        }
+
+        runningApplication?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    }
+
+    private static func commonBundleIdentifier(for applicationName: String) -> String? {
+        switch applicationName.lowercased() {
+        case "blender":
+            return "org.blenderfoundation.blender"
+        case "chrome", "google chrome":
+            return "com.google.Chrome"
+        case "safari":
+            return "com.apple.Safari"
+        case "xcode":
+            return "com.apple.dt.Xcode"
+        case "terminal":
+            return "com.apple.Terminal"
+        default:
+            return nil
+        }
     }
 
     private func labelMatchScore(query: String, label: String) -> Double? {
@@ -412,84 +754,45 @@ final class TipTourEngine {
         let latestTargets: [LocalPerceptionTargetCache.SnapshotTarget]
     }
 
-    private func executeGroundedActionWithOneRepair(
+    private func executeGroundedActionOnce(
         goal: String,
         app: String?,
         requestedActionType: WorkflowStep.StepType,
-        requestedTargetLabel: String?,
         initialTarget: LocalPerceptionTargetCache.SnapshotTarget,
         initialTargets: [LocalPerceptionTargetCache.SnapshotTarget],
         requireStateChange: Bool
     ) async -> GroundedActionExecutionResult {
-        var attempts: [TipTourEngineActionAttempt] = []
-        var attemptedTargetIDs = Set<String>()
-        var currentTarget: LocalPerceptionTargetCache.SnapshotTarget? = initialTarget
-        var targetsBeforeAttempt = initialTargets
+        let attempt = await executeGroundedActionAttempt(
+            attemptNumber: 1,
+            goal: goal,
+            app: app,
+            actionType: requestedActionType,
+            target: initialTarget,
+            targetsBeforeAttempt: initialTargets,
+            requireStateChange: requireStateChange
+        )
+        recordActionAttempt(attempt)
 
-        for attemptNumber in 1...2 {
-            guard let target = currentTarget else {
-                let lastAttempt = attempts.last
-                let reason = lastAttempt?.validation.requiredStateChange == true
-                    && lastAttempt?.validation.stateChanged == false
-                    ? "state_unchanged"
-                    : "repair_target_not_found"
-                return GroundedActionExecutionResult(
-                    ok: false,
-                    reason: reason,
-                    message: "The first target did not validate, and no alternate local target matched after refreshing perception.",
-                    attempts: attempts,
-                    repaired: attemptNumber > 1,
-                    latestTargets: targetsBeforeAttempt
-                )
-            }
-
-            attemptedTargetIDs.insert(target.id)
-            let attempt = await executeGroundedActionAttempt(
-                attemptNumber: attemptNumber,
-                goal: goal,
-                app: app,
-                actionType: requestedActionType,
-                target: target,
-                targetsBeforeAttempt: targetsBeforeAttempt,
-                requireStateChange: requireStateChange
-            )
-            attempts.append(attempt)
-            recordActionAttempt(attempt)
-
-            if attempt.submission.ok,
-               attempt.workflowOutcome.status == "completed",
-               (!attempt.validation.requiredStateChange || attempt.validation.stateChanged) {
-                return GroundedActionExecutionResult(
-                    ok: true,
-                    reason: nil,
-                    message: attemptNumber == 1
-                        ? "Executed one grounded TipTour action."
-                        : "Executed one grounded TipTour action after refreshing local perception.",
-                    attempts: attempts,
-                    repaired: attemptNumber > 1,
-                    latestTargets: LocalPerceptionTargetCache.shared.currentTargets()
-                )
-            }
-
-            guard attemptNumber == 1 else { break }
-            await refreshLocalPerception("harness repair after failed grounded action")
-            targetsBeforeAttempt = LocalPerceptionTargetCache.shared.currentTargets()
-            currentTarget = bestTarget(
-                requestedLabel: requestedTargetLabel,
-                goal: goal,
-                targets: targetsBeforeAttempt,
-                excludingTargetIDs: attemptedTargetIDs
+        if attempt.submission.ok,
+           attempt.workflowOutcome.status == "completed",
+           (!attempt.validation.requiredStateChange || attempt.validation.stateChanged) {
+            return GroundedActionExecutionResult(
+                ok: true,
+                reason: nil,
+                message: "Executed one grounded TipTour action.",
+                attempts: [attempt],
+                repaired: false,
+                latestTargets: LocalPerceptionTargetCache.shared.currentTargets()
             )
         }
 
-        let lastAttempt = attempts.last
         let reason: String
-        if lastAttempt?.submission.ok == false {
-            reason = lastAttempt?.submission.reason ?? "submission_failed"
-        } else if lastAttempt?.workflowOutcome.status != "completed" {
-            reason = lastAttempt?.workflowOutcome.reason ?? lastAttempt?.workflowOutcome.status ?? "workflow_not_completed"
-        } else if lastAttempt?.validation.requiredStateChange == true,
-                  lastAttempt?.validation.stateChanged == false {
+        if !attempt.submission.ok {
+            reason = attempt.submission.reason ?? "submission_failed"
+        } else if attempt.workflowOutcome.status != "completed" {
+            reason = attempt.workflowOutcome.reason ?? attempt.workflowOutcome.status
+        } else if attempt.validation.requiredStateChange,
+                  !attempt.validation.stateChanged {
             reason = "state_unchanged"
         } else {
             reason = "grounded_action_failed"
@@ -498,9 +801,9 @@ final class TipTourEngine {
         return GroundedActionExecutionResult(
             ok: false,
             reason: reason,
-            message: "TipTour could not validate the grounded action after a local repair attempt.",
-            attempts: attempts,
-            repaired: attempts.count > 1,
+            message: "TipTour ran one grounded action but could not validate it.",
+            attempts: [attempt],
+            repaired: false,
             latestTargets: LocalPerceptionTargetCache.shared.currentTargets()
         )
     }
@@ -591,6 +894,8 @@ final class TipTourEngine {
         TipTourEnginePlannedActionStep(
             type: actionType.rawValue,
             label: target.label,
+            targetID: target.id,
+            targetMark: target.mark,
             hint: "Use local perception target \"\(target.label)\"",
             box2D: target.normalizedBox2D,
             matchedSource: target.source,

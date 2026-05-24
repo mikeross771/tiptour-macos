@@ -3,12 +3,11 @@
 //  TipTour
 //
 //  Central state manager for the Gemini Live voice companion. Owns the
-//  push-to-talk hotkey, screen capture, Gemini Live session, tool handlers
-//  for cursor pointing + multi-step workflows, and overlay management.
+//  push-to-talk hotkey, screen capture, Gemini Live session, single-action
+//  tool handlers for cursor pointing, and overlay management.
 //
 
 import ApplicationServices
-import AVFoundation
 import Combine
 import CuaDriverCore
 import Foundation
@@ -27,6 +26,7 @@ enum CompanionVoiceState {
 final class CompanionManager: ObservableObject {
     @Published private(set) var voiceState: CompanionVoiceState = .idle
     @Published private(set) var lastTranscript: String?
+    @Published private(set) var textCommandActivityText: String?
     @Published private(set) var currentAudioPowerLevel: CGFloat = 0
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
@@ -45,34 +45,35 @@ final class CompanionManager: ObservableObject {
 
     /// Debug-only visual overlay for the restored native CoreML/Vision
     /// detector. This is deliberately not sent to Gemini yet.
-    @Published var isAccurateGroundingEnabled: Bool = UserDefaults.standard.object(forKey: "isAccurateGroundingEnabled") == nil
-        ? false
-        : UserDefaults.standard.bool(forKey: "isAccurateGroundingEnabled")
-    @Published var isDetectionOverlayEnabled: Bool = false
+    @Published var isAccurateGroundingEnabled: Bool = TipTourDefaults.isAccurateGroundingEnabled
+    @Published var isDetectionOverlayEnabled: Bool = TipTourDefaults.isDetectionOverlayEnabled
     @Published var detectionOverlayElements: [[String: Any]] = []
     @Published var detectionOverlayImageSize: [Int] = [1512, 982]
     @Published var detectionOverlayDisplayFrame: CGRect?
     @Published var detectionOverlayHighlightedLabel: String?
 
-    @Published var isCuaActionDriverEnabled: Bool = UserDefaults.standard.object(forKey: "isCuaActionDriverEnabled") == nil
-        ? true
-        : UserDefaults.standard.bool(forKey: "isCuaActionDriverEnabled")
-    @Published var isHermesOrchestratorEnabled: Bool = UserDefaults.standard.bool(forKey: "isHermesOrchestratorEnabled")
+    @Published var isCuaActionDriverEnabled: Bool = TipTourDefaults.isCuaActionDriverEnabled
+    @Published var isHermesOrchestratorEnabled: Bool = TipTourDefaults.isHermesOrchestratorEnabled
 
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// Freeform attention brush. Hold control + shift and move the mouse
-    /// to paint the area the user means by "this area" / "this line".
+    /// Freeform attention trail. Hold control + shift and move the mouse
+    /// over the area the user means by "this area" / "this line".
     @Published private(set) var isFocusHighlightActive: Bool = false
     @Published private(set) var focusHighlightGlobalPoints: [CGPoint] = []
     @Published private(set) var lastFocusHighlightContext: FocusHighlightContext?
+    @Published private(set) var isRadialInputSwitcherVisible = false
+    @Published private(set) var radialInputSwitcherCenter: CGPoint?
+    @Published private(set) var highlightedRadialInputOption: RadialInputOption?
     private var currentFocusHighlightWindowContext: FocusHighlightWindowContext?
     private var lastHoverWindowContext: FocusHighlightWindowContext?
     private var lastHoverWindowContextDate: Date?
     private var lastHoverTextSelectionContext: FocusHighlightTextSelectionContext?
 
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
+    let globalTextCommandShortcutMonitor = GlobalTextCommandShortcutMonitor()
+    let globalRadialInputShortcutMonitor = GlobalRadialInputShortcutMonitor()
     let globalHighlightShortcutMonitor = GlobalHighlightShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
 
@@ -86,11 +87,18 @@ final class CompanionManager: ObservableObject {
     }()
 
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var textCommandShortcutCancellable: AnyCancellable?
+    private var radialInputShortcutCancellable: AnyCancellable?
     private var highlightTransitionCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var voiceAudioPowerCancellable: AnyCancellable?
     private var voiceModelSpeakingCancellable: AnyCancellable?
+    private let claudeActionPlannerClient = ClaudeActionPlannerClient()
+    private let hermesAgentClient = HermesAgentClient()
+    private var hermesSessionID: String?
+    private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     private var detectionOverlayTask: Task<Void, Never>?
+    private var postActionDetectionRefreshTask: Task<Void, Never>?
     private var detectionOverlayScreenMonitorTask: Task<Void, Never>?
     private var detectionOverlayAppActivationObserver: NSObjectProtocol?
     private var detectionOverlayScreenParametersObserver: NSObjectProtocol?
@@ -111,9 +119,6 @@ final class CompanionManager: ObservableObject {
     private lazy var engineFacade = TipTourEngine(
         isAutopilotEnabledProvider: { [weak self] in
             self?.isAutopilotEnabled ?? false
-        },
-        isMultiStepTourGuideEnabledProvider: { [weak self] in
-            self?.isMultiStepTourGuideEnabled ?? false
         },
         isScreenshotStreamingEnabledProvider: { [weak self] in
             self?.isScreenshotStreamingEnabled ?? false
@@ -191,8 +196,11 @@ final class CompanionManager: ObservableObject {
             if isNewUtterance {
                 self.handledToolCallIDsThisUtterance.removeAll()
                 self.acceptedToolCallIDThisUtterance = nil
-                if !self.sendLatestFocusHighlightContextToGeminiIfPossible() {
-                    self.sendLatestHoverWindowContextToGeminiIfPossible()
+                Task { [weak self] in
+                    guard let self else { return }
+                    if !(await self.sendLatestFocusHighlightContextToGeminiIfPossible()) {
+                        self.sendLatestHoverWindowContextToGeminiIfPossible()
+                    }
                 }
             }
             self.previousInputTranscriptLength = fullInputTranscript.count
@@ -307,8 +315,84 @@ final class CompanionManager: ObservableObject {
         targetAppName: String
     ) -> [WorkflowStep] {
         coalescingConsecutiveTypeSteps(
-            normalizingNewNoteSteps(steps, targetAppName: targetAppName)
+            normalizingSemanticKeyboardSteps(
+                normalizingNewNoteSteps(steps, targetAppName: targetAppName),
+                targetAppName: targetAppName
+            )
         )
+    }
+
+    private func normalizingSemanticKeyboardSteps(
+        _ steps: [WorkflowStep],
+        targetAppName: String
+    ) -> [WorkflowStep] {
+        steps.map { step in
+            guard step.type == .keyboardShortcut || step.type == .pressKey else { return step }
+            guard let rawLabel = step.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawLabel.isEmpty else {
+                return step
+            }
+
+            let normalizedLabel = rawLabel
+                .lowercased()
+                .filter { $0.isLetter || $0.isNumber }
+            let normalizedAppName = targetAppName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            guard let semanticKeyboardReplacement = semanticKeyboardReplacement(
+                for: normalizedLabel,
+                in: normalizedAppName
+            ) else {
+                return step
+            }
+
+            print("[Workflow] normalized semantic key \"\(rawLabel)\" to \(semanticKeyboardReplacement.label)")
+            return WorkflowStep(
+                id: step.id,
+                type: semanticKeyboardReplacement.type,
+                label: semanticKeyboardReplacement.label,
+                value: step.value,
+                direction: step.direction,
+                amount: step.amount,
+                by: step.by,
+                targetContext: step.targetContext,
+                hint: step.hint,
+                hintX: step.hintX,
+                hintY: step.hintY,
+                box2DNormalized: step.box2DNormalized,
+                screenNumber: step.screenNumber
+            )
+        }
+    }
+
+    private func semanticKeyboardReplacement(
+        for normalizedLabel: String,
+        in normalizedAppName: String
+    ) -> (type: WorkflowStep.StepType, label: String)? {
+        if let activeSkill = MarkdownAppSkillRegistry.shared.skill(applicationName: normalizedAppName),
+           let skillCommandAlias = activeSkill.commandAlias(for: normalizedLabel) {
+            return (skillCommandAlias.type, skillCommandAlias.label)
+        }
+
+        switch normalizedLabel {
+        case "selectall":
+            return (.keyboardShortcut, "Cmd+A")
+        case "copy":
+            return (.keyboardShortcut, "Cmd+C")
+        case "paste":
+            return (.keyboardShortcut, "Cmd+V")
+        case "cut":
+            return (.keyboardShortcut, "Cmd+X")
+        case "undo":
+            return (.keyboardShortcut, "Cmd+Z")
+        case "redo":
+            return (.keyboardShortcut, "Cmd+Shift+Z")
+        case "save":
+            return (.keyboardShortcut, "Cmd+S")
+        default:
+            return nil
+        }
     }
 
     private func normalizingNewNoteSteps(
@@ -522,19 +606,19 @@ final class CompanionManager: ObservableObject {
             return ["ok": false, "reason": "empty_steps"]
         }
 
-        let parsedSteps = Array(normalizedSteps.prefix(1))
-        if normalizedSteps.count > parsedSteps.count {
-            print("[Tool] ✂️ single-action mode: ignoring \(normalizedSteps.count - parsedSteps.count) extra step(s)")
-        }
-
-        guard isAutopilotEnabled || isMultiStepTourGuideEnabled else {
-            print("[Tool] ✗ submit_workflow_plan — tour guide disabled and Autopilot off")
+        guard isAutopilotEnabled else {
+            print("[Tool] ✗ submit_workflow_plan — Autopilot off")
             voiceBackend.invalidateScreenshotHashCache()
             return [
                 "ok": false,
-                "reason": "tour_guide_disabled",
-                "message": "The step-by-step teaching tour guide is disabled. If the user wants action-taking, ask them to turn Autopilot on; otherwise answer conversationally without submitting a workflow plan."
+                "reason": "autopilot_disabled",
+                "message": "TipTour Autopilot is off. Ask the user to turn Autopilot on before submitting a workflow plan."
             ]
+        }
+
+        let parsedSteps = Array(normalizedSteps.prefix(1))
+        if normalizedSteps.count > parsedSteps.count {
+            print("[Tool] ✂️ single-action mode: ignoring \(normalizedSteps.count - parsedSteps.count) extra step(s)")
         }
 
         let plan = WorkflowPlan(
@@ -548,83 +632,11 @@ final class CompanionManager: ObservableObject {
 
         voiceBackend.suppressScreenshotsUntilUserSpeaks()
 
-        if isMultiStepTourGuideEnabled {
-            // Pause mic + screenshots so Gemini can narrate the plan in one
-            // uninterrupted turn. Once narration finishes, exit narration mode
-            // — mic/screenshots resume but the WebSocket stays open.
-            print("[Workflow] entering Gemini narration mode — mic/screenshots paused, socket kept alive for narration")
-            voiceBackend.enterNarrationMode()
-            scheduleExitNarrationModeAfterSpeechEnds()
-        }
-
         return [
             "ok": true,
             "accepted_steps": stepLabels.count,
-            "ignored_steps": max(0, normalizedSteps.count - parsedSteps.count),
-            "tour_guide_enabled": isMultiStepTourGuideEnabled
+            "ignored_steps": max(0, normalizedSteps.count - parsedSteps.count)
         ]
-    }
-
-    /// Wait for Gemini's post-tool narration turn to finish, then exit
-    /// narration mode so mic + periodic screenshots resume. Session stays
-    /// open for conversational follow-ups.
-    private func scheduleExitNarrationModeAfterSpeechEnds() {
-        // OpenAI Realtime regularly takes 3-5s for post-tool-call audio
-        // to start arriving (TTFT after function_call_output → response.create).
-        // Gemini Live is closer to 1-2s. Use 6s so neither backend's
-        // narration is cut off before it can start.
-        let silentNarrationGraceSeconds: TimeInterval = 6.0
-        let quietConfirmationSeconds: TimeInterval = 0.8
-        let maxTotalWaitSeconds: TimeInterval = 15.0
-
-        Task { [weak self] in
-            guard let self = self else { return }
-
-            let startedAt = Date()
-            let maxDeadline = startedAt.addingTimeInterval(maxTotalWaitSeconds)
-            var hasObservedSpeechStart = false
-            var quietSinceTimestamp: Date?
-
-            while Date() < maxDeadline {
-                try? await Task.sleep(nanoseconds: 200_000_000)
-
-                let (isActive, speaking, playing) = await MainActor.run { () -> (Bool, Bool, Bool) in
-                    (
-                        self.voiceBackend.isActive,
-                        self.voiceBackend.isModelSpeaking,
-                        self.voiceBackend.isAudioPlaying
-                    )
-                }
-                if !isActive { return }
-
-                let currentlySpeaking = speaking || playing
-                if currentlySpeaking {
-                    hasObservedSpeechStart = true
-                    quietSinceTimestamp = nil
-                    continue
-                }
-
-                if !hasObservedSpeechStart,
-                   Date().timeIntervalSince(startedAt) >= silentNarrationGraceSeconds {
-                    break
-                }
-
-                if hasObservedSpeechStart {
-                    if quietSinceTimestamp == nil {
-                        quietSinceTimestamp = Date()
-                    } else if let quietStart = quietSinceTimestamp,
-                              Date().timeIntervalSince(quietStart) >= quietConfirmationSeconds {
-                        break
-                    }
-                }
-            }
-
-            await MainActor.run {
-                guard self.voiceBackend.isActive else { return }
-                print("[Workflow] narration window closed — exiting narration mode, session stays alive for follow-ups")
-                self.voiceBackend.exitNarrationMode()
-            }
-        }
     }
 
     /// Set of tool-call IDs we've already dispatched within the current
@@ -640,24 +652,22 @@ final class CompanionManager: ObservableObject {
     // MARK: - Toggles
 
     /// Pin the menu bar panel so outside clicks don't dismiss it.
-    @Published var isPanelPinned: Bool = UserDefaults.standard.bool(forKey: "isPanelPinned")
+    @Published var isPanelPinned: Bool = TipTourDefaults.isPanelPinned
 
     func setPanelPinned(_ pinned: Bool) {
         isPanelPinned = pinned
-        UserDefaults.standard.set(pinned, forKey: "isPanelPinned")
+        TipTourDefaults.isPanelPinned = pinned
         NotificationCenter.default.post(name: .tipTourPanelPinStateChanged, object: nil)
     }
 
     /// Neko mode: replace the blue triangle cursor with a pixel-art cat
     /// (classic oneko sprites). Defaults OFF so the standard cursor
     /// remains the primary action-taking visual on new installs.
-    @Published var isNekoModeEnabled: Bool = UserDefaults.standard.object(forKey: "isNekoModeEnabled") == nil
-        ? false
-        : UserDefaults.standard.bool(forKey: "isNekoModeEnabled")
+    @Published var isNekoModeEnabled: Bool = TipTourDefaults.isNekoModeEnabled
 
     func setNekoModeEnabled(_ enabled: Bool) {
         isNekoModeEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isNekoModeEnabled")
+        TipTourDefaults.isNekoModeEnabled = enabled
     }
 
     /// Autopilot mode: when enabled, TipTour CLICKS the resolved
@@ -674,23 +684,21 @@ final class CompanionManager: ObservableObject {
     /// when the post-click AX fingerprint didn't change. Pressing the
     /// hotkey closes the Gemini Live session and stops anything in
     /// flight. Autopilot rides those rails — it doesn't bypass them.
-    @Published var isAutopilotEnabled: Bool = UserDefaults.standard.object(forKey: "isAutopilotEnabled") == nil
-        ? true
-        : UserDefaults.standard.bool(forKey: "isAutopilotEnabled")
+    @Published var isAutopilotEnabled: Bool = TipTourDefaults.isAutopilotEnabled
 
     func setAutopilotEnabled(_ enabled: Bool) {
         isAutopilotEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isAutopilotEnabled")
+        TipTourDefaults.isAutopilotEnabled = enabled
     }
 
     func setCuaActionDriverEnabled(_ enabled: Bool) {
         isCuaActionDriverEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isCuaActionDriverEnabled")
+        TipTourDefaults.isCuaActionDriverEnabled = enabled
     }
 
     func setHermesOrchestratorEnabled(_ enabled: Bool) {
         isHermesOrchestratorEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isHermesOrchestratorEnabled")
+        TipTourDefaults.isHermesOrchestratorEnabled = enabled
     }
 
     var tipTourConnections: [TipTourConnection] {
@@ -715,41 +723,12 @@ final class CompanionManager: ObservableObject {
     /// Privacy mode for Gemini Live visual context. When enabled, TipTour
     /// sends screen JPEGs to Gemini. When disabled, Gemini still hears the
     /// user and can call tools, but it does not receive screenshots.
-    @Published var isScreenshotStreamingEnabled: Bool = UserDefaults.standard.object(forKey: "isScreenshotStreamingEnabled") == nil
-        ? true
-        : UserDefaults.standard.bool(forKey: "isScreenshotStreamingEnabled")
+    @Published var isScreenshotStreamingEnabled: Bool = TipTourDefaults.isScreenshotStreamingEnabled
 
     func setScreenshotStreamingEnabled(_ enabled: Bool) {
         isScreenshotStreamingEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isScreenshotStreamingEnabled")
+        TipTourDefaults.isScreenshotStreamingEnabled = enabled
         _voiceBackend?.setScreenshotStreamingEnabled(enabled)
-    }
-
-    /// Feature flag for the older teaching/tour-guide experience:
-    /// visible checklist, step-by-step user-click guidance, and plan
-    /// narration mode. Defaults OFF while action-taking is the primary
-    /// path.
-    @Published var isMultiStepTourGuideEnabled: Bool = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
-        ? false
-        : UserDefaults.standard.bool(forKey: "isMultiStepTourGuideEnabled")
-
-    func setMultiStepTourGuideEnabled(_ enabled: Bool) {
-        isMultiStepTourGuideEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isMultiStepTourGuideEnabled")
-    }
-
-    /// Debug flag for the workflow checklist: when true, ClickDetector
-    /// advances on ANY click instead of requiring the click to land
-    /// within 40pt of the resolved target.
-    @Published var advanceOnAnyClickEnabled: Bool = UserDefaults.standard.bool(forKey: "advanceOnAnyClickEnabled") {
-        didSet {
-            ClickDetector.advanceOnAnyClickEnabled = advanceOnAnyClickEnabled
-        }
-    }
-
-    func setAdvanceOnAnyClickEnabled(_ enabled: Bool) {
-        advanceOnAnyClickEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "advanceOnAnyClickEnabled")
     }
 
     // MARK: - Onboarding
@@ -757,8 +736,8 @@ final class CompanionManager: ObservableObject {
     /// Whether the user has completed onboarding at least once. Persisted
     /// to UserDefaults so the Start button only appears on first launch.
     var hasCompletedOnboarding: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasCompletedOnboarding") }
+        get { TipTourDefaults.hasCompletedOnboarding }
+        set { TipTourDefaults.hasCompletedOnboarding = newValue }
     }
 
     /// Text streamed character-by-character on the cursor when the user
@@ -832,9 +811,10 @@ final class CompanionManager: ObservableObject {
         // presses the hotkey.
         _ = voiceBackend
         bindShortcutTransitions()
+        bindTextCommandShortcut()
+        bindRadialInputShortcut()
         bindHighlightTransitions()
         beginTrackingUserTargetApp()
-        ClickDetector.advanceOnAnyClickEnabled = advanceOnAnyClickEnabled
 
         // Wire the autopilot toggle into the workflow runner. The
         // runner reads this on every step to decide whether to fly the
@@ -861,9 +841,13 @@ final class CompanionManager: ObservableObject {
     func stop() {
         stopNativeDetection()
         globalPushToTalkShortcutMonitor.stop()
+        globalTextCommandShortcutMonitor.stop()
+        globalRadialInputShortcutMonitor.stop()
         globalHighlightShortcutMonitor.stop()
         overlayWindowManager.hideOverlay()
         shortcutTransitionCancellable?.cancel()
+        textCommandShortcutCancellable?.cancel()
+        radialInputShortcutCancellable?.cancel()
         highlightTransitionCancellable?.cancel()
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
@@ -881,7 +865,7 @@ final class CompanionManager: ObservableObject {
 
     func setDetectionOverlayEnabled(_ enabled: Bool) {
         isDetectionOverlayEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isDetectionOverlayEnabled")
+        TipTourDefaults.isDetectionOverlayEnabled = enabled
 
         if enabled {
             overlayWindowManager.hasShownOverlayBefore = true
@@ -900,7 +884,7 @@ final class CompanionManager: ObservableObject {
 
     func setAccurateGroundingEnabled(_ enabled: Bool) {
         isAccurateGroundingEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "isAccurateGroundingEnabled")
+        TipTourDefaults.isAccurateGroundingEnabled = enabled
 
         if enabled {
             startNativeDetection()
@@ -941,20 +925,17 @@ final class CompanionManager: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.scheduleNativeDetectionOverlayRefresh(reason: "screen parameters changed")
+                self?.handleDetectionOverlayScreenParametersChanged()
             }
         }
 
         if detectionOverlayClickObserver == nil {
             detectionOverlayClickObserver = NotificationCenter.default.addObserver(
-                forName: .tipTourUserInterfaceClickExecuted,
+                forName: .tipTourUserInterfaceActionExecuted,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                self?.scheduleNativeDetectionOverlayRefresh(
-                    reason: "click changed UI",
-                    debounceNanoseconds: 240_000_000
-                )
+                self?.schedulePostActionNativeDetectionRefresh()
             }
         }
     }
@@ -995,11 +976,36 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private func schedulePostActionNativeDetectionRefresh() {
+        guard shouldRunNativeDetection else { return }
+
+        postActionDetectionRefreshTask?.cancel()
+        postActionDetectionRefreshTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.refreshNativeDetectionOverlay(reason: "CUA action changed UI")
+
+            try? await Task.sleep(nanoseconds: 360_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.refreshNativeDetectionOverlay(reason: "CUA action settle refresh")
+        }
+    }
+
+    private func handleDetectionOverlayScreenParametersChanged() {
+        guard shouldRunNativeDetection else { return }
+
+        if isOverlayVisible {
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        }
+        lastDetectionOverlaySceneSignature = currentDetectionOverlaySceneSignature()
+        scheduleNativeDetectionOverlayRefresh(reason: "screen parameters changed", debounceNanoseconds: 0)
+    }
+
     private func refreshNativeDetectionOverlay(reason: String) async {
         do {
-            let mouseLocation = NSEvent.mouseLocation
-            let cursorScreen = NSScreen.screens.first { $0.frame.contains(mouseLocation) } ?? NSScreen.main
-            let capturedImage = try await CompanionScreenCaptureUtility.capturePrimaryScreenAsCGImage()
+            let capturedScreen = try await CompanionScreenCaptureUtility.captureCursorScreenAsCGImage()
+            let capturedImage = capturedScreen.image
+            let capturedDisplayFrame = capturedScreen.displayFrame
             let detectedElements = await NativeElementDetector.shared.detectElements(in: capturedImage)
             let overlayElements = detectedElements.map { detectedElement in
                 [
@@ -1023,15 +1029,13 @@ final class CompanionManager: ObservableObject {
             detectionOverlayImageSize = [capturedImage.width, capturedImage.height]
             if isDetectionOverlayEnabled {
                 detectionOverlayElements = overlayElements
-                detectionOverlayDisplayFrame = cursorScreen?.frame
+                detectionOverlayDisplayFrame = capturedDisplayFrame
             }
-            if let displayFrame = cursorScreen?.frame {
-                LocalPerceptionTargetCache.shared.update(
-                    elements: overlayElements,
-                    imageSize: CGSize(width: capturedImage.width, height: capturedImage.height),
-                    displayFrame: displayFrame
-                )
-            }
+            LocalPerceptionTargetCache.shared.update(
+                elements: overlayElements,
+                imageSize: CGSize(width: capturedImage.width, height: capturedImage.height),
+                displayFrame: capturedDisplayFrame
+            )
             lastDetectionOverlaySceneSignature = currentDetectionOverlaySceneSignature()
             print("[NativeDetector] overlay refreshed — \(reason)")
         } catch {
@@ -1042,6 +1046,8 @@ final class CompanionManager: ObservableObject {
     private func stopNativeDetection() {
         detectionOverlayTask?.cancel()
         detectionOverlayTask = nil
+        postActionDetectionRefreshTask?.cancel()
+        postActionDetectionRefreshTask = nil
         detectionOverlayScreenMonitorTask?.cancel()
         detectionOverlayScreenMonitorTask = nil
         if let detectionOverlayAppActivationObserver {
@@ -1099,9 +1105,13 @@ final class CompanionManager: ObservableObject {
 
         if currentlyHasAccessibility {
             globalPushToTalkShortcutMonitor.start()
+            globalTextCommandShortcutMonitor.start()
+            globalRadialInputShortcutMonitor.start()
             globalHighlightShortcutMonitor.start()
         } else {
             globalPushToTalkShortcutMonitor.stop()
+            globalTextCommandShortcutMonitor.stop()
+            globalRadialInputShortcutMonitor.stop()
             globalHighlightShortcutMonitor.stop()
         }
 
@@ -1127,7 +1137,7 @@ final class CompanionManager: ObservableObject {
         }
         // Screen content permission is persisted — once approved it sticks.
         if !hasScreenContentPermission {
-            hasScreenContentPermission = UserDefaults.standard.bool(forKey: "hasScreenContentPermission")
+            hasScreenContentPermission = TipTourDefaults.hasScreenContentPermission
         }
 
         if !previouslyHadAll && allPermissionsGranted {
@@ -1158,7 +1168,7 @@ final class CompanionManager: ObservableObject {
                     isRequestingScreenContent = false
                     guard didCapture else { return }
                     hasScreenContentPermission = true
-                    UserDefaults.standard.set(true, forKey: "hasScreenContentPermission")
+                    TipTourDefaults.hasScreenContentPermission = true
                     TipTourAnalytics.trackPermissionGranted(permission: "screen_content")
 
                     if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible {
@@ -1190,6 +1200,24 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] transition in
                 self?.handleShortcutTransition(transition)
+            }
+    }
+
+    private func bindTextCommandShortcut() {
+        textCommandShortcutCancellable = globalTextCommandShortcutMonitor
+            .shortcutPressedPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.presentTextCommandPanel()
+            }
+    }
+
+    private func bindRadialInputShortcut() {
+        radialInputShortcutCancellable = globalRadialInputShortcutMonitor
+            .switcherTransitionPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] transition in
+                self?.handleRadialInputSwitcherTransition(transition)
             }
     }
 
@@ -1272,48 +1300,174 @@ final class CompanionManager: ObservableObject {
     private func handleShortcutTransition(_ transition: PushToTalkShortcut.ShortcutTransition) {
         switch transition {
         case .pressed:
-            // Snapshot the user's real frontmost app BEFORE opening the
-            // menu bar panel or cursor overlay. Once TipTour shows any UI
-            // macOS may flip frontmost to us, so this is the only reliable
-            // moment to capture which app the user was actually looking at.
-            let hoverWindowContext = Self.windowContext(at: NSEvent.mouseLocation)
-            if let hoverWindowContext {
-                lastHoverWindowContext = hoverWindowContext
-                lastHoverWindowContextDate = Date()
-                lastHoverTextSelectionContext = Self.textSelectionContext(for: hoverWindowContext)
-                updateTargetAppOverride(for: hoverWindowContext)
-                print("[Target] user's app under mouse at hotkey press: \(hoverWindowContext.bundleIdentifier ?? "?") (\(hoverWindowContext.appName))")
-            } else if let frontmost = NSWorkspace.shared.frontmostApplication,
-               frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
-                AccessibilityTreeResolver.userTargetAppOverride = frontmost
-                print("[Target] user's app at hotkey press: \(frontmost.bundleIdentifier ?? "?") (\(frontmost.localizedName ?? "?"))")
-            }
-
-            NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
-            clearDetectedElementLocation()
-            WorkflowRunner.shared.stop()
-
-            showOnboardingPrompt = false
-            onboardingPromptText = ""
-            onboardingPromptOpacity = 0.0
-
-            TipTourAnalytics.trackPushToTalkStarted()
-
-            // Gemini Live uses TOGGLE behavior — press once to start, press
-            // again to end. The connection stays open across turns so the
-            // user can have a real conversation.
-            if voiceBackend.isActive {
-                stopVoiceSession()
-                voiceState = .idle
-            } else {
-                startVoiceSession()
-                voiceState = .listening
-            }
+            startVoiceInputFromUserGesture(reason: "hotkey press")
         case .released:
-            // Release is a no-op — the session is toggled by hotkey PRESS.
             TipTourAnalytics.trackPushToTalkReleased()
         case .none:
             break
+        }
+    }
+
+    private func startVoiceInputFromUserGesture(reason: String) {
+        captureTargetAppContextForShortcutPress(reason: reason)
+
+        NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        clearDetectedElementLocation()
+        WorkflowRunner.shared.stop()
+
+        showOnboardingPrompt = false
+        onboardingPromptText = ""
+        onboardingPromptOpacity = 0.0
+
+        TipTourAnalytics.trackPushToTalkStarted()
+
+        // Voice is intentionally a single realtime path. Text commands can
+        // still route through Claude/Hermes, but speech should not branch into
+        // a second STT/TTS stack.
+        if voiceBackend.isActive {
+            stopVoiceSession()
+            voiceState = .idle
+        } else {
+            startVoiceSession()
+            voiceState = .listening
+        }
+    }
+
+    private func presentTextCommandPanel() {
+        captureTargetAppContextForShortcutPress(reason: "text command")
+        NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+        textCommandActivityText = nil
+        textCommandPanelManager.show()
+
+        Task { [weak self] in
+            guard let self else { return }
+            if self.shouldRunNativeDetection {
+                await self.refreshNativeDetectionOverlay(reason: "text command opened")
+            }
+        }
+    }
+
+    private func handleRadialInputSwitcherTransition(_ transition: GlobalRadialInputShortcutMonitor.SwitcherTransition) {
+        switch transition {
+        case .began(let globalPoint):
+            beginRadialInputSwitcher(at: globalPoint)
+        case .moved(let globalPoint):
+            updateRadialInputSwitcherHover(at: globalPoint)
+        case .ended(let globalPoint):
+            endRadialInputSwitcher(at: globalPoint)
+        }
+    }
+
+    private func beginRadialInputSwitcher(at globalPoint: CGPoint) {
+        if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        radialInputSwitcherCenter = globalPoint
+        highlightedRadialInputOption = nil
+        isRadialInputSwitcherVisible = true
+        NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+    }
+
+    private func updateRadialInputSwitcherHover(at globalPoint: CGPoint) {
+        guard isRadialInputSwitcherVisible,
+              let radialInputSwitcherCenter else { return }
+
+        highlightedRadialInputOption = radialInputOption(
+            for: globalPoint,
+            center: radialInputSwitcherCenter
+        )
+    }
+
+    private func endRadialInputSwitcher(at globalPoint: CGPoint) {
+        guard isRadialInputSwitcherVisible else { return }
+
+        let selectedOption = radialInputSwitcherCenter.flatMap {
+            radialInputOption(for: globalPoint, center: $0)
+        } ?? highlightedRadialInputOption
+
+        isRadialInputSwitcherVisible = false
+        radialInputSwitcherCenter = nil
+        highlightedRadialInputOption = nil
+
+        guard let selectedOption else { return }
+        performRadialInputOption(selectedOption)
+    }
+
+    private func radialInputOption(
+        for globalPoint: CGPoint,
+        center: CGPoint
+    ) -> RadialInputOption? {
+        let deltaX = globalPoint.x - center.x
+        let deltaY = globalPoint.y - center.y
+        let distance = hypot(deltaX, deltaY)
+        guard distance >= 24 else { return nil }
+
+        let angleInDegrees = atan2(deltaY, deltaX) * 180 / .pi
+        if angleInDegrees >= 30 && angleInDegrees <= 150 {
+            return .speak
+        }
+        if angleInDegrees >= -90 && angleInDegrees < 30 {
+            return .type
+        }
+        return .highlight
+    }
+
+    private func performRadialInputOption(_ option: RadialInputOption) {
+        switch option {
+        case .speak:
+            startVoiceInputFromUserGesture(reason: "radial speak")
+        case .type:
+            presentTextCommandPanel()
+        case .highlight:
+            presentFocusHighlightHintFromRadialSwitcher()
+        }
+    }
+
+    private func presentFocusHighlightHintFromRadialSwitcher() {
+        captureTargetAppContextForShortcutPress(reason: "radial highlight")
+        if hasCompletedOnboarding && allPermissionsGranted && !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+            isOverlayVisible = true
+        }
+
+        presentTransientOverlayHint("Hold Ctrl+Shift and drag to highlight")
+    }
+
+    private func presentTransientOverlayHint(_ message: String) {
+        onboardingPromptText = message
+        onboardingPromptOpacity = 1.0
+        showOnboardingPrompt = true
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+            guard let self,
+                  self.onboardingPromptText == message else { return }
+            self.onboardingPromptOpacity = 0.0
+            self.showOnboardingPrompt = false
+            self.onboardingPromptText = ""
+        }
+    }
+
+    func dismissTextCommandPanel() {
+        textCommandPanelManager.hide()
+        textCommandActivityText = nil
+    }
+
+    private func captureTargetAppContextForShortcutPress(reason: String) {
+        let hoverWindowContext = Self.windowContext(at: NSEvent.mouseLocation)
+        if let hoverWindowContext {
+            lastHoverWindowContext = hoverWindowContext
+            lastHoverWindowContextDate = Date()
+            lastHoverTextSelectionContext = Self.textSelectionContext(for: hoverWindowContext)
+            updateTargetAppOverride(for: hoverWindowContext)
+            print("[Target] user's app under \(reason): \(hoverWindowContext.bundleIdentifier ?? "?") (\(hoverWindowContext.appName))")
+        } else if let frontmost = NSWorkspace.shared.frontmostApplication,
+                  frontmost.bundleIdentifier != Bundle.main.bundleIdentifier {
+            AccessibilityTreeResolver.userTargetAppOverride = frontmost
+            print("[Target] user's app for \(reason): \(frontmost.bundleIdentifier ?? "?") (\(frontmost.localizedName ?? "?"))")
         }
     }
 
@@ -1395,7 +1549,12 @@ final class CompanionManager: ObservableObject {
         }
         focusHighlightGlobalPoints = []
         currentFocusHighlightWindowContext = nil
-        sendLatestFocusHighlightContextToGeminiIfPossible()
+        Task { [weak self] in
+            await self?.sendLatestFocusHighlightContextToGeminiIfPossible(
+                forceFreshScreenshot: true,
+                shouldAskForAcknowledgement: true
+            )
+        }
     }
 
     private func updateTargetAppOverrideForFocusHighlightWindow() {
@@ -1413,13 +1572,25 @@ final class CompanionManager: ObservableObject {
     }
 
     @discardableResult
-    private func sendLatestFocusHighlightContextToGeminiIfPossible() -> Bool {
+    private func sendLatestFocusHighlightContextToGeminiIfPossible(
+        forceFreshScreenshot: Bool = false,
+        shouldAskForAcknowledgement: Bool = false
+    ) async -> Bool {
         guard voiceBackend.isActive,
               let context = lastFocusHighlightContext else {
             return false
         }
 
-        voiceBackend.sendText(focusHighlightContextPrompt(context))
+        let freshCapture = forceFreshScreenshot
+            ? await voiceBackend.sendFreshScreenshotForUserContext()
+            : nil
+        voiceBackend.sendText(
+            focusHighlightContextPrompt(
+                context,
+                capture: freshCapture ?? voiceBackend.latestCapture,
+                shouldAskForAcknowledgement: shouldAskForAcknowledgement
+            )
+        )
         voiceBackend.invalidateScreenshotHashCache()
         return true
     }
@@ -1434,7 +1605,28 @@ final class CompanionManager: ObservableObject {
         voiceBackend.invalidateScreenshotHashCache()
     }
 
-    private func focusHighlightContextPrompt(_ context: FocusHighlightContext) -> String {
+    private func plannerFocusHighlightContextDescription(captures: [CompanionScreenCapture]) -> String? {
+        guard let context = lastFocusHighlightContext else { return nil }
+        let matchingCapture = captureForFocusHighlight(context, captures: captures)
+            ?? voiceBackend.latestCapture
+        return focusHighlightContextPrompt(context, capture: matchingCapture)
+    }
+
+    private func captureForFocusHighlight(
+        _ context: FocusHighlightContext,
+        captures: [CompanionScreenCapture]
+    ) -> CompanionScreenCapture? {
+        captures.first { capture in
+            let intersection = context.globalAppKitBoundingRect.intersection(capture.displayFrame)
+            return !intersection.isNull && intersection.width > 0 && intersection.height > 0
+        }
+    }
+
+    private func focusHighlightContextPrompt(
+        _ context: FocusHighlightContext,
+        capture: CompanionScreenCapture? = nil,
+        shouldAskForAcknowledgement: Bool = false
+    ) -> String {
         let rect = context.globalAppKitBoundingRect
         var lines = [
             "user focus highlight context:",
@@ -1474,12 +1666,15 @@ final class CompanionManager: ObservableObject {
             lines.append("prefer this intersected element over any stale focused element when deciding what text area or control the highlight refers to. element_value_context may be the whole text field or note, so never type it back as the replacement unless the user explicitly asks to replace the whole field.")
         }
 
-        if let capture = voiceBackend.latestCapture,
+        if let capture,
            let screenshotRectDescription = screenshotRectDescription(for: context, capture: capture) {
             lines.append(screenshotRectDescription)
         }
 
         lines.append("when editing, prefer the accessibility element or text field intersecting this region; choose exactly one next action, such as clicking inside the region or typing into an already focused/highlighted range.")
+        if shouldAskForAcknowledgement {
+            lines.append("Briefly tell the user what the highlighted region appears to refer to. Do not take any desktop action yet.")
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -1928,11 +2123,12 @@ final class CompanionManager: ObservableObject {
 
     you have exactly ONE tool: submit_workflow_plan. call AT MOST ONE tool per turn. do NOT narrate before the tool call. call it silently, wait for the response, THEN speak ONCE.
 
-    \(Self.multiStepTourGuidePromptRule)
+    single-action rule:
+    submit_workflow_plan may contain exactly one step. do not create guided tours or chained action plans. for larger goals, pick only the next concrete action that makes progress, then wait for the next user turn and current screen state. if the user asks "how do i", "show me", "walk me through", or "teach me", answer conversationally or point at one visible element instead of creating a guided tour.
 
     UI ELEMENT HINTS (set-of-marks):
     alongside screenshots you will sometimes receive a "UI elements on screen" message listing pointable elements as [role:label] tokens — for example [button:Save] [menu:File] [item:New File...] [tab:Preview] [field:Search].
-    these labels come straight from the accessibility tree, so they are guaranteed to resolve. when a listed element matches what the user asked for, pass that EXACT label string (the part after the colon) to a workflow step. if nothing matches, fall back to the visible text you see in the screenshot.
+    these labels come straight from the accessibility tree or local perception, so they are strong grounding hints. when a listed element matches what the user asked for, pass that EXACT label string (the part after the colon) to a workflow step. if nothing matches, or if the listed local label seems stale/contradicted by the current screenshot, trust the current screenshot and use the visible text you see there.
 
     FOCUS HIGHLIGHT CONTEXT:
     the user can hold control plus shift and paint a freeform highlight over part of the screen. when they do, you receive a "user focus highlight context" message with a global rect, a current hover / last painted point, the hovered app/window target, and usually a normalized box_2d for the latest screenshot. treat phrases like "this", "that line", "this area", "rewrite this", "change this", "make this better", or "update the highlighted part" as referring to that highlighted region inside that hovered app/window. prefer visible elements, text fields, and text ranges that intersect the highlighted region. when an action should operate on that highlighted region, set targetContext:"currentHighlight" on the action step. when it should operate on a normal native selection, set targetContext:"currentSelection". when it should operate on the currently focused field, set targetContext:"focusedElement". do not type into some other app unless the user explicitly asks to switch apps.
@@ -1967,7 +2163,7 @@ final class CompanionManager: ObservableObject {
         goal  = short summary of the user's intent ("create a new file", "render an animation").
         app   = exact foreground app name visible in the screenshot ("Blender", "Xcode", "GarageBand"). never "macOS" or "unknown".
         steps = exactly one item: [{type?, label, value?, hint, targetContext?, point_2d?, box_2d?}]. the step MUST be visible on the current screen unless it has targetContext:"currentHighlight", targetContext:"currentSelection", or targetContext:"focusedElement".
-        point_2d = OPTIONAL exact click/target point in [y, x] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include this whenever you can, especially for Blender, games, canvas tools, tiny controls, toolbar icons, dense menus, and anything where the center of a box might be wrong.
+        point_2d = OPTIONAL exact click/target point in [y, x] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include this whenever you can, especially for Blender, games, canvas tools, tiny controls, toolbar icons, dense menus, and anything where the center of a box might be wrong. if local labels are ambiguous, the screenshot plus point_2d is the source of truth.
         box_2d = OPTIONAL bounding box for the step's element in [y1, x1, y2, x2] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include it as supporting context when useful, but point_2d is preferred for the actual target location.
 
     STEP TYPES (for submit_workflow_plan):
@@ -2090,18 +2286,6 @@ final class CompanionManager: ObservableObject {
     """
     }
 
-    private static var multiStepTourGuidePromptRule: String {
-        let isEnabled = UserDefaults.standard.object(forKey: "isMultiStepTourGuideEnabled") == nil
-            ? false
-            : UserDefaults.standard.bool(forKey: "isMultiStepTourGuideEnabled")
-
-        if isEnabled {
-            return "MULTI-STEP TOUR GUIDE MODE: unavailable in single-action mode. even when teaching is enabled, submit_workflow_plan may contain exactly one step."
-        }
-
-        return "MULTI-STEP TOUR GUIDE MODE: disabled. do not create guided tours or chained action plans. use submit_workflow_plan only for the next single Autopilot action. if the user asks \"how do i\", \"show me\", \"walk me through\", or \"teach me\", answer conversationally or point at one visible element instead of creating a guided tour."
-    }
-
     // MARK: - Image Conversion
 
     static func cgImage(from jpegData: Data) -> CGImage? {
@@ -2130,7 +2314,6 @@ final class CompanionManager: ObservableObject {
         }
 
         if let context = lastFocusHighlightContext,
-           Date().timeIntervalSince(context.createdAt) < 300,
            let hoveredWindow = context.hoveredWindow,
            !hoveredWindow.appName.isEmpty {
             configurePendingTextReplacementRangeIfNeeded(
@@ -2292,6 +2475,222 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    func submitTextCommand(_ prompt: String) async {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        textCommandActivityText = "Planning next action..."
+        voiceState = .processing
+
+        do {
+            let submissionResult = try await runPointerPromptWorkflow(
+                prompt: trimmedPrompt,
+                sourceLabel: "TextCommand"
+            )
+            if !submissionResult.ok {
+                lastTranscript = "Text command failed: \(submissionResult.reason ?? "unknown")"
+                textCommandActivityText = "Failed: \(submissionResult.reason ?? "unknown")"
+            } else {
+                textCommandActivityText = "Accepted by TipTour"
+            }
+        } catch {
+            lastTranscript = error.localizedDescription
+            textCommandActivityText = "Error: \(error.localizedDescription)"
+            print("[TextCommand] failed: \(error.localizedDescription)")
+        }
+
+        voiceState = .idle
+    }
+
+    private func runPointerPromptWorkflow(
+        prompt: String,
+        sourceLabel: String
+    ) async throws -> TipTourEngineSubmissionResult {
+        print("[\(sourceLabel)] pointer workflow entered")
+        if isHermesOrchestratorEnabled {
+            print("[\(sourceLabel)] routing to Hermes")
+            return try await runHermesPromptWorkflow(
+                prompt: prompt,
+                sourceLabel: sourceLabel
+            )
+        }
+
+        guard let claudeAPIKey = KeychainStore.claudeAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !claudeAPIKey.isEmpty else {
+            throw NSError(
+                domain: sourceLabel,
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Pointer agent needs a Claude key when Hermes is off."]
+            )
+        }
+
+        return try await runSharedPromptWorkflow(
+            prompt: prompt,
+            sourceLabel: sourceLabel,
+            claudeAPIKey: claudeAPIKey
+        )
+    }
+
+    private func runHermesPromptWorkflow(
+        prompt: String,
+        sourceLabel: String
+    ) async throws -> TipTourEngineSubmissionResult {
+        if sourceLabel == "TextCommand" {
+            textCommandActivityText = "Hermes: connecting..."
+        }
+
+        let hermesPrompt = hermesPromptWithTipTourContext(prompt, sourceLabel: sourceLabel)
+        let result = try await hermesAgentClient.streamPrompt(
+            hermesPrompt,
+            resumeSessionID: hermesSessionID,
+            onChunk: { [weak self] accumulatedText in
+                await MainActor.run {
+                    guard let self else { return }
+                    self.lastTranscript = accumulatedText
+                    if sourceLabel == "TextCommand" {
+                        self.textCommandActivityText = "Hermes: \(self.compactStatusText(accumulatedText))"
+                    }
+                }
+            },
+            onToolProgress: { [weak self] progressText in
+                await MainActor.run {
+                    guard let self else { return }
+                    let statusText = "Tool: \(progressText)"
+                    self.lastTranscript = statusText
+                    if sourceLabel == "TextCommand" {
+                        self.textCommandActivityText = statusText
+                    }
+                }
+            }
+        )
+
+        hermesSessionID = result.sessionID
+        let finalText = result.responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !finalText.isEmpty {
+            lastTranscript = finalText
+            if sourceLabel == "TextCommand" {
+                textCommandActivityText = "Hermes: \(compactStatusText(finalText))"
+            }
+        } else if sourceLabel == "TextCommand" {
+            textCommandActivityText = "Hermes finished"
+        }
+
+        return TipTourEngineSubmissionResult(
+            ok: true,
+            reason: nil,
+            message: finalText.isEmpty ? "Hermes completed without a text response." : finalText,
+            acceptedSteps: 0,
+            ignoredSteps: 0,
+            activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+        )
+    }
+
+    private func hermesPromptWithTipTourContext(_ prompt: String, sourceLabel: String) -> String {
+        let frontmostApplication = NSWorkspace.shared.frontmostApplication
+        let activeApp = frontmostApplication?.localizedName ?? "unknown"
+        let screenshotMode = isScreenshotStreamingEnabled ? "enabled" : "disabled"
+        let groundingMode = isAccurateGroundingEnabled ? "enabled" : "disabled"
+        let activeAppSkillInstructions = MarkdownAppSkillRegistry.shared
+            .plannerInstructions(for: frontmostApplication)
+            .map { "\n\($0)\n" } ?? ""
+        let currentFocusHighlightContext = plannerFocusHighlightContextDescription(captures: [])
+            .map { "\n\($0)\n" } ?? "none"
+        return """
+        Source: \(sourceLabel)
+        Active Mac app: \(activeApp)
+        TipTour Autopilot: \(isAutopilotEnabled ? "enabled" : "disabled")
+        TipTour Accurate Grounding: \(groundingMode)
+        TipTour screenshot streaming setting: \(screenshotMode)
+        \(activeAppSkillInstructions)
+        Current TipTour focus highlight:
+        \(currentFocusHighlightContext)
+
+        User request:
+        \(prompt)
+        """
+    }
+
+    private func compactStatusText(_ text: String) -> String {
+        let singleLineText = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard singleLineText.count > 110 else { return singleLineText }
+        let endIndex = singleLineText.index(singleLineText.startIndex, offsetBy: 110)
+        return String(singleLineText[..<endIndex]) + "..."
+    }
+
+    private func runSharedPromptWorkflow(
+        prompt: String,
+        sourceLabel: String,
+        claudeAPIKey: String
+    ) async throws -> TipTourEngineSubmissionResult {
+        print("[\(sourceLabel)] shared Claude planner workflow entered")
+        if shouldRunNativeDetection {
+            if sourceLabel == "TextCommand" {
+                textCommandActivityText = "Refreshing local targets..."
+            }
+            print("[\(sourceLabel)] refreshing native detection before planning")
+            await refreshNativeDetectionOverlay(reason: "\(sourceLabel) planning")
+        }
+
+        let captures: [CompanionScreenCapture]
+        if isScreenshotStreamingEnabled {
+            if sourceLabel == "TextCommand" {
+                textCommandActivityText = "Capturing screen context..."
+            }
+            print("[\(sourceLabel)] capturing screenshots for Claude planner")
+            captures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
+        } else {
+            captures = []
+        }
+        print("[\(sourceLabel)] planner captures=\(captures.count)")
+
+        let localTargets = LocalPerceptionTargetCache.shared.currentTargets()
+        print("[\(sourceLabel)] local targets=\(localTargets.count)")
+        let focusHighlightContextDescription = plannerFocusHighlightContextDescription(captures: captures)
+        print("[\(sourceLabel)] focus highlight context=\(focusHighlightContextDescription == nil ? "none" : "present")")
+        let targetAppName = lastFocusHighlightContext?.hoveredWindow?.appName
+            ?? lastHoverWindowContext?.appName
+            ?? AccessibilityTreeResolver.userTargetAppOverride?.localizedName
+            ?? NSWorkspace.shared.frontmostApplication?.localizedName
+        print("[\(sourceLabel)] target app=\(targetAppName ?? "unknown")")
+        let targetApplicationForSkills = lastFocusHighlightContext?.hoveredWindow
+            .flatMap { NSRunningApplication(processIdentifier: $0.processIdentifier) }
+            ?? AccessibilityTreeResolver.userTargetAppOverride
+            ?? NSWorkspace.shared.frontmostApplication
+        print("[\(sourceLabel)] loading app skill instructions")
+        let appSkillInstructions = MarkdownAppSkillRegistry.shared
+            .plannerInstructions(for: targetApplicationForSkills)
+        print("[\(sourceLabel)] app skill instructions=\(appSkillInstructions == nil ? "none" : "present")")
+
+        if sourceLabel == "TextCommand" {
+            let targetSummary = targetAppName.map { " for \($0)" } ?? ""
+            textCommandActivityText = "Calling Claude planner\(targetSummary)..."
+        } else {
+            print("[\(sourceLabel)] calling Claude planner")
+        }
+        let plannerResult = try await claudeActionPlannerClient.planNextAction(
+            transcript: prompt,
+            targetAppName: targetAppName,
+            captures: captures,
+            localTargets: localTargets,
+            appSkillInstructions: appSkillInstructions,
+            focusHighlightContext: focusHighlightContextDescription,
+            apiKey: claudeAPIKey
+        )
+        print("[\(sourceLabel)] Claude planner returned \(plannerResult.plan.steps.count) step(s)")
+
+        if sourceLabel == "TextCommand",
+           let firstStep = plannerResult.plan.steps.first {
+            let stepLabel = firstStep.label ?? firstStep.value ?? firstStep.hint
+            textCommandActivityText = "Tool: submit_workflow_plan -> \(stepLabel)"
+        }
+        let submissionResult = engineFacade.submitSingleActionWorkflowPlan(plannerResult.plan)
+        print("[\(sourceLabel)] submitted single action: ok=\(submissionResult.ok), reason=\(submissionResult.reason ?? "none")")
+
+        return submissionResult
+    }
+
     /// Walk the user's target app AX tree to prime caches so the first
     /// CUA plan resolves against warm data. The set-of-marks
     /// walk inside `setOfMarksForTargetApp` is the heaviest AX call
@@ -2314,6 +2713,6 @@ final class CompanionManager: ObservableObject {
     /// End the Gemini Live session.
     func stopVoiceSession() {
         WorkflowRunner.shared.stop()
-        voiceBackend.stop()
+        _voiceBackend?.stop()
     }
 }

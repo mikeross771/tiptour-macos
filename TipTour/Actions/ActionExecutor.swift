@@ -199,7 +199,7 @@ final class CuaActionDriver: TipTourActionDriver {
             useFrontmostHIDPath: true
         )
         print("[ActionExecutor] CUA clicked pid=\(targetProcessIdentifier) at \(cuaScreenPoint)")
-        NotificationCenter.default.post(name: .tipTourUserInterfaceClickExecuted, object: nil)
+        postUserInterfaceActionExecuted()
     }
 
     func rightClick(
@@ -238,11 +238,17 @@ final class CuaActionDriver: TipTourActionDriver {
         let targetProcessIdentifier = targetApplication.processIdentifier
         let hotkeyTokens = try normalizedHotkeyTokens(from: shortcutString)
 
-        try KeyboardInput.hotkey(
-            hotkeyTokens,
-            toPid: targetProcessIdentifier
-        )
-        print("[ActionExecutor] CUA pressed shortcut \"\(shortcutString)\" on pid=\(targetProcessIdentifier)")
+        do {
+            try KeyboardInput.hotkey(
+                hotkeyTokens,
+                toPid: targetProcessIdentifier
+            )
+            print("[ActionExecutor] CUA pressed shortcut \"\(shortcutString)\" on pid=\(targetProcessIdentifier)")
+        } catch {
+            try postKeyboardShortcutUsingQuartz(hotkeyTokens)
+            print("[ActionExecutor] Quartz fallback pressed shortcut \"\(shortcutString)\" on pid=\(targetProcessIdentifier) after CUA failed: \(error.localizedDescription)")
+        }
+        postUserInterfaceActionExecuted()
     }
 
     func pressKey(
@@ -264,11 +270,18 @@ final class CuaActionDriver: TipTourActionDriver {
             )
         }
 
-        try KeyboardInput.press(
-            normalizeShortcutToken(keyName),
-            toPid: targetProcessIdentifier
-        )
-        print("[ActionExecutor] CUA pressed key \"\(keyName)\" on pid=\(targetProcessIdentifier)")
+        let normalizedKeyName = normalizeShortcutToken(keyName)
+        do {
+            try KeyboardInput.press(
+                normalizedKeyName,
+                toPid: targetProcessIdentifier
+            )
+            print("[ActionExecutor] CUA pressed key \"\(keyName)\" on pid=\(targetProcessIdentifier)")
+        } catch {
+            try postKeyUsingQuartz(normalizedKeyName)
+            print("[ActionExecutor] Quartz fallback pressed key \"\(keyName)\" on pid=\(targetProcessIdentifier) after CUA failed: \(error.localizedDescription)")
+        }
+        postUserInterfaceActionExecuted()
     }
 
     func typeText(
@@ -281,6 +294,13 @@ final class CuaActionDriver: TipTourActionDriver {
         try await activateTargetApplicationIfNeeded(targetApplication)
 
         let targetProcessIdentifier = targetApplication.processIdentifier
+
+        if shouldTypeTextUsingPhysicalKeys(text, targetApplication: targetApplication) {
+            try await typeTextUsingPhysicalKeys(text)
+            print("[ActionExecutor] typed skill-directed modal input \"\(text)\" via physical key events on pid=\(targetProcessIdentifier)")
+            postUserInterfaceActionExecuted()
+            return
+        }
 
         let hasArmedHighlightReplacementRange = hasPendingTextReplacementRange(
             for: targetProcessIdentifier
@@ -300,6 +320,7 @@ final class CuaActionDriver: TipTourActionDriver {
                 value: text as CFString
             )
             print("[ActionExecutor] CUA inserted \(text.count) characters via AX on pid=\(targetProcessIdentifier)")
+            postUserInterfaceActionExecuted()
         } catch {
             guard !hasArmedHighlightReplacementRange else {
                 print("[ActionExecutor] refused key-event fallback because highlighted range could not be applied: \(error)")
@@ -311,6 +332,7 @@ final class CuaActionDriver: TipTourActionDriver {
                 toPid: targetProcessIdentifier
             )
             print("[ActionExecutor] CUA pasted \(text.count) characters via clipboard hotkey on pid=\(targetProcessIdentifier)")
+            postUserInterfaceActionExecuted()
         }
     }
 
@@ -337,6 +359,7 @@ final class CuaActionDriver: TipTourActionDriver {
                 value: value as CFString
             )
             print("[ActionExecutor] CUA replaced highlighted text via setValue payload on pid=\(targetProcessIdentifier)")
+            postUserInterfaceActionExecuted()
             return
         }
 
@@ -346,6 +369,7 @@ final class CuaActionDriver: TipTourActionDriver {
             value: value as CFString
         )
         print("[ActionExecutor] CUA set focused AXValue on pid=\(targetProcessIdentifier)")
+        postUserInterfaceActionExecuted()
     }
 
     func scroll(
@@ -369,6 +393,7 @@ final class CuaActionDriver: TipTourActionDriver {
             try KeyboardInput.press(keyName, toPid: targetProcessIdentifier)
         }
         print("[ActionExecutor] CUA scrolled \(direction) via \(clampedAmount)x \(keyName) on pid=\(targetProcessIdentifier)")
+        postUserInterfaceActionExecuted()
     }
 
     func openApplication(named applicationName: String) async throws {
@@ -380,6 +405,7 @@ final class CuaActionDriver: TipTourActionDriver {
             try await bringApplicationToForeground(runningApplication)
         }
         print("[ActionExecutor] CUA opened app \"\(applicationName)\" pid=\(launchedApplication.pid)")
+        postUserInterfaceActionExecuted()
     }
 
     func openURL(_ rawURLString: String, preferredApplicationName: String? = nil) async throws {
@@ -406,6 +432,7 @@ final class CuaActionDriver: TipTourActionDriver {
         }
 
         print("[ActionExecutor] opened URL \(url.absoluteString)")
+        postUserInterfaceActionExecuted()
     }
 
     func setPendingTextReplacementRange(
@@ -443,7 +470,11 @@ final class CuaActionDriver: TipTourActionDriver {
             useFrontmostHIDPath: true
         )
         print("[ActionExecutor] CUA \(button.rawValue)-clicked pid=\(targetProcessIdentifier) at \(cuaScreenPoint)")
-        NotificationCenter.default.post(name: .tipTourUserInterfaceClickExecuted, object: nil)
+        postUserInterfaceActionExecuted()
+    }
+
+    private func postUserInterfaceActionExecuted() {
+        NotificationCenter.default.post(name: .tipTourUserInterfaceActionExecuted, object: nil)
     }
 
     // MARK: - Target App
@@ -558,6 +589,24 @@ final class CuaActionDriver: TipTourActionDriver {
         } catch {
             restorePasteboard(pasteboard, items: previousPasteboardItems)
             throw error
+        }
+    }
+
+    private func shouldTypeTextUsingPhysicalKeys(
+        _ text: String,
+        targetApplication: NSRunningApplication
+    ) -> Bool {
+        MarkdownAppSkillRegistry.shared
+            .skill(for: targetApplication)?
+            .shouldTypeUsingPhysicalKeys(text) == true
+    }
+
+    private func typeTextUsingPhysicalKeys(_ text: String) async throws {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for character in trimmedText {
+            let keyName = String(character)
+            try postKeyUsingQuartz(keyName)
+            try await Task.sleep(nanoseconds: 35_000_000)
         }
     }
 
@@ -678,6 +727,92 @@ final class CuaActionDriver: TipTourActionDriver {
         return modifierTokens + [finalKeyToken]
     }
 
+    private func postKeyboardShortcutUsingQuartz(_ hotkeyTokens: [String]) throws {
+        let modifierTokens = hotkeyTokens.dropLast()
+        guard let finalKeyToken = hotkeyTokens.last else {
+            throw ActionExecutorError.unparseableKeyboardShortcut("")
+        }
+
+        let modifierKeys = try modifierTokens.map { try quartzModifierKey(for: $0) }
+        let finalKeyCode = try quartzKeyCode(for: finalKeyToken)
+        let activeFlags = quartzEventFlags(for: modifierKeys)
+
+        for modifierKey in modifierKeys {
+            postQuartzKeyEvent(
+                keyCode: modifierKey.keyCode,
+                isKeyDown: true,
+                flags: activeFlags
+            )
+        }
+
+        postQuartzKeyEvent(keyCode: finalKeyCode, isKeyDown: true, flags: activeFlags)
+        postQuartzKeyEvent(keyCode: finalKeyCode, isKeyDown: false, flags: activeFlags)
+
+        for modifierKey in modifierKeys.reversed() {
+            postQuartzKeyEvent(
+                keyCode: modifierKey.keyCode,
+                isKeyDown: false,
+                flags: []
+            )
+        }
+    }
+
+    private func postKeyUsingQuartz(_ keyName: String) throws {
+        let keyCode = try quartzKeyCode(for: keyName)
+        postQuartzKeyEvent(keyCode: keyCode, isKeyDown: true, flags: [])
+        postQuartzKeyEvent(keyCode: keyCode, isKeyDown: false, flags: [])
+    }
+
+    private func postQuartzKeyEvent(
+        keyCode: CGKeyCode,
+        isKeyDown: Bool,
+        flags: CGEventFlags
+    ) {
+        let event = CGEvent(
+            keyboardEventSource: CGEventSource(stateID: .hidSystemState),
+            virtualKey: keyCode,
+            keyDown: isKeyDown
+        )
+        event?.flags = flags
+        event?.post(tap: .cghidEventTap)
+    }
+
+    private func quartzModifierKey(for token: String) throws -> QuartzModifierKey {
+        switch token {
+        case "cmd", "command":
+            return QuartzModifierKey(keyCode: 55, flag: .maskCommand)
+        case "shift":
+            return QuartzModifierKey(keyCode: 56, flag: .maskShift)
+        case "option", "alt":
+            return QuartzModifierKey(keyCode: 58, flag: .maskAlternate)
+        case "ctrl", "control":
+            return QuartzModifierKey(keyCode: 59, flag: .maskControl)
+        default:
+            throw ActionExecutorError.unparseableKeyboardShortcut(token)
+        }
+    }
+
+    private func quartzEventFlags(for modifierKeys: [QuartzModifierKey]) -> CGEventFlags {
+        modifierKeys.reduce(CGEventFlags()) { combinedFlags, modifierKey in
+            combinedFlags.union(modifierKey.flag)
+        }
+    }
+
+    private func quartzKeyCode(for keyName: String) throws -> CGKeyCode {
+        let normalizedKeyName = keyName.lowercased()
+        if normalizedKeyName.count == 1,
+           let character = normalizedKeyName.unicodeScalars.first,
+           let keyCode = Self.quartzKeyCodeByCharacter[character] {
+            return keyCode
+        }
+
+        if let keyCode = Self.quartzSpecialKeyCodes[normalizedKeyName] {
+            return keyCode
+        }
+
+        throw ActionExecutorError.unparseableKeyboardShortcut(keyName)
+    }
+
     private func normalizeShortcutToken(_ token: String) -> String {
         let normalizedRawToken = token
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -729,5 +864,78 @@ final class CuaActionDriver: TipTourActionDriver {
         "ctrl",
         "control",
         "fn"
+    ]
+
+    private struct QuartzModifierKey {
+        let keyCode: CGKeyCode
+        let flag: CGEventFlags
+    }
+
+    private static let quartzKeyCodeByCharacter: [UnicodeScalar: CGKeyCode] = [
+        "a": 0,
+        "s": 1,
+        "d": 2,
+        "f": 3,
+        "h": 4,
+        "g": 5,
+        "z": 6,
+        "x": 7,
+        "c": 8,
+        "v": 9,
+        "b": 11,
+        "q": 12,
+        "w": 13,
+        "e": 14,
+        "r": 15,
+        "y": 16,
+        "t": 17,
+        "1": 18,
+        "2": 19,
+        "3": 20,
+        "4": 21,
+        "6": 22,
+        "5": 23,
+        "=": 24,
+        "9": 25,
+        "7": 26,
+        "-": 27,
+        "8": 28,
+        "0": 29,
+        "]": 30,
+        "o": 31,
+        "u": 32,
+        "[": 33,
+        "i": 34,
+        "p": 35,
+        "l": 37,
+        "j": 38,
+        "'": 39,
+        "k": 40,
+        ";": 41,
+        "\\": 42,
+        ",": 43,
+        "/": 44,
+        "n": 45,
+        "m": 46,
+        ".": 47,
+        "`": 50
+    ]
+
+    private static let quartzSpecialKeyCodes: [String: CGKeyCode] = [
+        "return": 36,
+        "enter": 36,
+        "tab": 48,
+        "space": 49,
+        "delete": 51,
+        "escape": 53,
+        "left": 123,
+        "right": 124,
+        "down": 125,
+        "up": 126,
+        "pageup": 116,
+        "pagedown": 121,
+        "home": 115,
+        "end": 119,
+        "forwarddelete": 117
     ]
 }

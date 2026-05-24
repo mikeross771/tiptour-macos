@@ -130,6 +130,8 @@ final class TipTourHarnessServer {
                 "ok": true,
                 "tools": [
                     "tiptour.observe",
+                    "tiptour.skills",
+                    "tiptour.active_skill",
                     "tiptour.targets",
                     "tiptour.plan_next_action",
                     "tiptour.action_history",
@@ -140,6 +142,10 @@ final class TipTourHarnessServer {
             ])
         case ("GET", "/v1/observe"):
             response = encodableResponse(tipTourEngine.observe())
+        case ("GET", "/v1/skills"):
+            response = encodableResponse(tipTourEngine.skills())
+        case ("GET", "/v1/skills/active"), ("GET", "/v1/active-skill"), ("GET", "/v1/active_skill"):
+            response = encodableResponse(tipTourEngine.activeSkill())
         case ("GET", "/v1/targets"), ("GET", "/v1/grounding-targets"):
             response = await handleTargetsRequest()
         case ("GET", "/v1/action-history"), ("GET", "/v1/action_history"):
@@ -172,15 +178,7 @@ final class TipTourHarnessServer {
     private func handlePlanNextActionRequest(body: Data) async -> HarnessHTTPResponse {
         do {
             let request = try JSONDecoder().decode(HarnessPlanNextActionRequest.self, from: body)
-            let result = await tipTourEngine.planNextAction(
-                goal: request.goal,
-                app: request.app,
-                requestedActionType: WorkflowStep.StepType.normalized(from: request.type ?? request.action),
-                requestedTargetLabel: request.targetLabel ?? request.target_label ?? request.label,
-                execute: request.execute ?? true,
-                allowScreenshotPlanning: request.allowScreenshotPlanning ?? request.allow_screenshot_planning ?? false,
-                validateStateChange: request.validateStateChange ?? request.validate_state_change ?? true
-            )
+            let result = await tipTourEngine.runPointerAction(request.pointerActionRequest)
             return encodableResponse(result)
         } catch {
             return jsonResponse(
@@ -288,11 +286,29 @@ private struct HarnessPlanNextActionRequest: Decodable {
     let label: String?
     let targetLabel: String?
     let target_label: String?
+    let targetID: String?
+    let target_id: String?
+    let targetMark: Int?
+    let target_mark: Int?
     let execute: Bool?
     let allowScreenshotPlanning: Bool?
     let allow_screenshot_planning: Bool?
     let validateStateChange: Bool?
     let validate_state_change: Bool?
+
+    var pointerActionRequest: PointerActionRequest {
+        PointerActionRequest(
+            goal: goal,
+            app: app,
+            actionType: WorkflowStep.StepType.normalized(from: type ?? action),
+            targetLabel: targetLabel ?? target_label ?? label,
+            targetID: targetID ?? target_id,
+            targetMark: targetMark ?? target_mark,
+            execute: execute ?? true,
+            allowScreenshotPlanning: allowScreenshotPlanning ?? allow_screenshot_planning ?? false,
+            validateStateChange: validateStateChange ?? validate_state_change ?? true
+        )
+    }
 }
 
 private struct HarnessWorkflowPlanRequest: Decodable {
@@ -316,7 +332,12 @@ private struct HarnessWorkflowStepRequest: Decodable {
     let type: String?
     let action: String?
     let label: String?
+    let targetLabel: String?
+    let target_label: String?
+    let key: String?
+    let shortcut: String?
     let value: String?
+    let text: String?
     let direction: String?
     let amount: Int?
     let by: String?
@@ -337,8 +358,8 @@ private struct HarnessWorkflowStepRequest: Decodable {
         return WorkflowStep(
             id: id ?? "harness_step_\(index + 1)",
             type: WorkflowStep.StepType.normalized(from: type ?? action),
-            label: label,
-            value: value,
+            label: label ?? targetLabel ?? target_label ?? key ?? shortcut,
+            value: value ?? text,
             direction: direction,
             amount: amount,
             by: by,

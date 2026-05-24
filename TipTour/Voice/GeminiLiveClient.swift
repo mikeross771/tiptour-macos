@@ -171,7 +171,7 @@ final class GeminiLiveClient: @unchecked Sendable {
         // a second planner model or a separate point-at-element path.
         let submitWorkflowPlanTool: [String: Any] = [
             "name": "submit_workflow_plan",
-            "description": "Submit exactly one CUA action step for anything the user wants done on the computer: open an app, open a URL, click UI, press a shortcut, type text, edit highlighted/selected content, or scroll. Never submit a multi-step sequence; wait for the next screen/user turn before the next action.",
+            "description": "Submit exactly one CUA action step for anything the user wants done on the computer: open an app, open a URL, click UI, press a shortcut, type text, edit highlighted/selected content, or scroll. Never submit a chained sequence; wait for the next screen/user turn before the next action.",
             "parameters": [
                 "type": "object",
                 "properties": [

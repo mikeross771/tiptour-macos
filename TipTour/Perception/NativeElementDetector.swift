@@ -292,9 +292,19 @@ class NativeElementDetector {
         let ocrElements = elements.filter { $0.source == "ocr" && !$0.label.isEmpty }
         guard !yoloBoxes.isEmpty else { return nil }
 
-        // 1. Boxes that contain the hint point. Pick the smallest.
+        // 1. Boxes that contain the hint point. Pick the smallest only
+        // when OCR on that box agrees with the requested label. In
+        // dense Blender menus, Gemini's point can be one row off; a
+        // blind containing-box snap then turns "UV Sphere" into "Ico
+        // Sphere". A label contradiction should fall back to raw
+        // Gemini coordinates instead of snapping to the wrong sibling.
         let containingBoxes = yoloBoxes.filter { $0.bbox.contains(hint) }
-        if let tightestBox = containingBoxes.min(by: { $0.bbox.area < $1.bbox.area }) {
+        let labelConfirmedContainingBoxes = containingBoxes.filter { box in
+            labelsForYoloBox(box, ocrElements: ocrElements).contains { boxLabel in
+                Self.strictLabelMatchesQuery(query: label, label: boxLabel)
+            }
+        }
+        if let tightestBox = labelConfirmedContainingBoxes.min(by: { $0.bbox.area < $1.bbox.area }) {
             return FoundElement(
                 label: labelForYoloBox(tightestBox, ocrElements: ocrElements) ?? label,
                 center: tightestBox.center,
@@ -308,7 +318,6 @@ class NativeElementDetector {
         //    the query AND is reasonably close to the hint. If found,
         //    that's a high-confidence snap. If not, return nil so the
         //    caller can fall back to raw LLM coordinates.
-        let normalizedQuery = Self.normalizeQuery(label)
         let labelMatchSearchRadius: CGFloat = 200
 
         var labelMatchedBoxes: [(box: DetectedElement, distance: CGFloat)] = []
@@ -320,9 +329,7 @@ class NativeElementDetector {
                 .filter { box.bbox.intersects($0.bbox) || box.bbox.contains($0.center) }
                 .map { $0.label }
             for boxLabel in boxLabels {
-                let normalizedLabel = Self.normalizeQuery(boxLabel)
-                let shared = normalizedLabel.words.intersection(normalizedQuery.words)
-                if !shared.isEmpty {
+                if Self.strictLabelMatchesQuery(query: label, label: boxLabel) {
                     labelMatchedBoxes.append((box, distance))
                     break
                 }
@@ -348,8 +355,17 @@ class NativeElementDetector {
 
     /// Pick the best OCR text overlapping a YOLO box, for labeling/logging.
     private func labelForYoloBox(_ yoloBox: DetectedElement, ocrElements: [DetectedElement]) -> String? {
-        let overlapping = ocrElements.filter { yoloBox.bbox.intersects($0.bbox) }
-        return overlapping.max(by: { $0.bbox.area < $1.bbox.area })?.label
+        let overlapping = labelsForYoloBox(yoloBox, ocrElements: ocrElements)
+        return overlapping.first
+    }
+
+    private func labelsForYoloBox(_ yoloBox: DetectedElement, ocrElements: [DetectedElement]) -> [String] {
+        return ocrElements.filter { yoloBox.bbox.intersects($0.bbox) }
+            .sorted { first, second in
+                first.bbox.area > second.bbox.area
+            }
+            .map(\.label)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     /// Find from cache only (instant, no detection). Returns nil if cache is stale (>3s).
@@ -405,6 +421,38 @@ class NativeElementDetector {
         let rawWords = lower.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         let meaningfulWords = rawWords.filter { !stopWords.contains($0) }
         return (full: lower, words: Set(meaningfulWords.isEmpty ? rawWords : meaningfulWords))
+    }
+
+    private static func strictLabelMatchesQuery(query: String, label: String) -> Bool {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty, !trimmedLabel.isEmpty else { return false }
+
+        let queryLower = trimmedQuery.lowercased()
+        let labelLower = trimmedLabel.lowercased()
+        let normalizedQuery = normalizeQuery(trimmedQuery)
+        let normalizedLabel = normalizeQuery(trimmedLabel)
+        let minimumSubstringLength = 3
+
+        if queryLower == labelLower { return true }
+        if normalizedQuery.full == normalizedLabel.full { return true }
+
+        if queryLower.count >= minimumSubstringLength,
+           labelLower.count >= minimumSubstringLength,
+           (labelLower.contains(queryLower) || queryLower.contains(labelLower)) {
+            return true
+        }
+
+        let sharedWords = normalizedLabel.words
+            .intersection(normalizedQuery.words)
+            .filter { $0.count >= minimumSubstringLength }
+        guard !sharedWords.isEmpty else { return false }
+
+        if normalizedQuery.words.count > 1 {
+            return sharedWords.count == normalizedQuery.words.count
+        }
+
+        return true
     }
 
     /// Among candidates sharing the top score, pick the one closest to
@@ -478,6 +526,10 @@ class NativeElementDetector {
                 .intersection(normalizedQuery.words)
                 .filter { $0.count >= minSubstringLength }
             if !meaningfulShared.isEmpty {
+                if normalizedQuery.words.count > 1,
+                   meaningfulShared.count < normalizedQuery.words.count {
+                    return nil
+                }
                 let coverage = Double(meaningfulShared.count) / Double(max(normalizedQuery.words.count, 1))
                 if coverage >= 1.0 { return (ocrElement, 2) }
                 if coverage >= 0.5 { return (ocrElement, 1) }

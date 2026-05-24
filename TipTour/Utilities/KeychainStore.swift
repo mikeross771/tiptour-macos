@@ -104,4 +104,10 @@ enum KeychainStore {
         set { set(newValue ?? "", forKey: "geminiAPIKey") }
     }
 
+    /// Anthropic API key used by the text command planner when Hermes is off.
+    static var claudeAPIKey: String? {
+        get { get(forKey: "claudeAPIKey") }
+        set { set(newValue ?? "", forKey: "claudeAPIKey") }
+    }
+
 }

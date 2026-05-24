@@ -20,7 +20,6 @@ enum PermissionRequestPresentationDestination: Equatable {
 class WindowPositionManager {
     private static var hasAttemptedAccessibilitySystemPromptDuringCurrentLaunch = false
     private static var hasAttemptedScreenRecordingSystemPromptDuringCurrentLaunch = false
-    private static let hasPreviouslyConfirmedScreenRecordingPermissionUserDefaultsKey = "com.learningbuddy.hasPreviouslyConfirmedScreenRecordingPermission"
 
     /// Returns true when the Mac currently has more than one connected display.
     /// Uses AppKit's screen list, which is available without ScreenCaptureKit's
@@ -79,7 +78,7 @@ class WindowPositionManager {
     static func hasScreenRecordingPermission() -> Bool {
         let hasScreenRecordingPermissionNow = CGPreflightScreenCaptureAccess()
         if hasScreenRecordingPermissionNow {
-            UserDefaults.standard.set(true, forKey: hasPreviouslyConfirmedScreenRecordingPermissionUserDefaultsKey)
+            TipTourDefaults.hasPreviouslyConfirmedScreenRecordingPermission = true
         }
         return hasScreenRecordingPermissionNow
     }
@@ -91,7 +90,7 @@ class WindowPositionManager {
     static func shouldTreatScreenRecordingPermissionAsGrantedForSessionLaunch() -> Bool {
         shouldTreatScreenRecordingPermissionAsGrantedForSessionLaunch(
             hasScreenRecordingPermissionNow: hasScreenRecordingPermission(),
-            hasPreviouslyConfirmedScreenRecordingPermission: UserDefaults.standard.bool(forKey: hasPreviouslyConfirmedScreenRecordingPermissionUserDefaultsKey)
+            hasPreviouslyConfirmedScreenRecordingPermission: TipTourDefaults.hasPreviouslyConfirmedScreenRecordingPermission
         )
     }
 
@@ -103,7 +102,7 @@ class WindowPositionManager {
     }
 
     static func clearPreviouslyConfirmedScreenRecordingPermission() {
-        UserDefaults.standard.removeObject(forKey: hasPreviouslyConfirmedScreenRecordingPermissionUserDefaultsKey)
+        TipTourDefaults.reset(.hasPreviouslyConfirmedScreenRecordingPermission)
     }
 
     /// Prompts the system dialog for Screen Recording permission.

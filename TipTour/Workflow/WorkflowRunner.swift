@@ -2,14 +2,12 @@
 //  WorkflowRunner.swift
 //  TipTour
 //
-//  Executes a WorkflowPlan step-by-step:
+//  Executes one WorkflowPlan action at a time:
 //    • Resolves the active step's element via ElementResolver and flies
 //      the cursor there.
 //    • Arms ClickDetector on the resolved target (preferring the real
 //      AX rect over a fixed radius) so a real user click advances the
-//      plan automatically.
-//    • Publishes the full plan so the overlay/panel can show the
-//      remaining steps as a checklist.
+//      current action automatically in Teaching mode.
 //    • Retries resolution with a budget instead of giving up silently
 //      when an element hasn't appeared yet — a menu that's still
 //      animating open should not stall the runner.
@@ -126,13 +124,10 @@ final class WorkflowRunner: ObservableObject {
     private let axPollTimeoutPerAttemptSeconds: Double = 0.9
 
     /// How long to wait after arming the click detector before
-    /// auto-clicking on the user's behalf in Autopilot mode. The
-    /// cursor-flight animation in `OverlayWindow` takes ~500ms; we add
-    /// a small grace period so the user sees the cursor land on the
-    /// element BEFORE we click — clicking mid-flight feels jarring
-    /// and makes the auto-click look like a glitch instead of a
-    /// deliberate action.
-    private let autopilotClickDelayAfterArmingSeconds: Double = 0.65
+    /// auto-clicking on the user's behalf in Autopilot mode. Keep this
+    /// short so harness-driven workflows feel responsive, while still
+    /// leaving enough time for the overlay pointer to visibly lock on.
+    private let autopilotClickDelayAfterArmingSeconds: Double = 0.28
 
     /// Closure that returns whether Autopilot mode is currently
     /// enabled. Injected from `CompanionManager` at app start so we
@@ -522,9 +517,7 @@ final class WorkflowRunner: ObservableObject {
         guard let step = activeStep else { return }
 
         // Non-click step types are only actionable when Autopilot is on
-        // (we need to actually press keys / type text — there's nothing
-        // to "point at" otherwise). In teaching mode we skip them so the
-        // checklist UI keeps moving forward instead of stalling.
+        // because there is no visible target to point at in Teaching mode.
         switch step.type {
         case .click, .rightClick, .doubleClick:
             guard let label = step.label, !label.isEmpty else {
@@ -581,10 +574,21 @@ final class WorkflowRunner: ObservableObject {
                 operationToken: operationToken
             )
 
-        case .waitForState, .observe:
-            // Not yet implemented — skip with a log so the checklist
-            // doesn't silently stall on a step we can't drive.
-            print("[Workflow] step \"\(step.hint)\" is .\(step.type.rawValue) — not yet implemented, skipping")
+        case .observe:
+            guard let label = step.label, !label.isEmpty else {
+                print("[Workflow] observe step \"\(step.hint)\" has no label — skipping")
+                advanceUsingCachedHandlers(isPostClick: false)
+                return
+            }
+            await resolveActiveStepWithRetryBudget(
+                label: label,
+                allScreenCaptures: freshCaptures,
+                isPostClick: isPostClick,
+                operationToken: operationToken
+            )
+
+        case .waitForState:
+            print("[Workflow] step \"\(step.hint)\" is .waitForState — not yet implemented, skipping")
             advanceUsingCachedHandlers(isPostClick: false)
         }
     }
@@ -704,6 +708,18 @@ final class WorkflowRunner: ObservableObject {
         // structure — "New" near the just-opened File menu beats a
         // stray "New Tab" button elsewhere on screen.
         previousStepResolvedGlobalScreenPoint = resolution.globalScreenPoint
+
+        if stepType == .observe {
+            ClickDetector.shared.disarm()
+            pointHandlerForActivePlan?(resolution)
+            Task { [weak self] in
+                guard let self else { return }
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                guard operationToken == self.currentOperationToken else { return }
+                self.advanceUsingCachedHandlers(isPostClick: false)
+            }
+            return
+        }
 
         // Validator setup: snapshot the AX fingerprint of the target app
         // BEFORE the click happens. After the click fires advance, we'll
@@ -863,9 +879,8 @@ final class WorkflowRunner: ObservableObject {
     }
 
     /// Execute a `.keyboardShortcut` step. The step's `label` is
-    /// expected to be the shortcut string (e.g. "Cmd+S"). In teaching
-    /// mode the step is skipped — TipTour can't "point at" a key
-    /// combo, and the user can read `step.hint` from the checklist.
+    /// expected to be the shortcut string (e.g. "Cmd+S"). In Teaching
+    /// mode the step pauses because TipTour can't point at a key combo.
     private func executeKeyboardShortcutStep(
         step: WorkflowStep,
         operationToken: UUID

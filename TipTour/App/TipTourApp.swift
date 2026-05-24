@@ -38,7 +38,7 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         print("🎯 TipTour: Starting...")
         print("🎯 TipTour: Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown")")
 
-        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 0])
+        TipTourDefaults.registerDefaults()
 
         TipTourAnalytics.configure()
         TipTourAnalytics.trackAppOpened()

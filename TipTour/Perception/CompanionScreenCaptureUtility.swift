@@ -25,6 +25,11 @@ struct CompanionScreenCapture {
     let captureTimestamp: Date
 }
 
+struct CompanionScreenCGImageCapture {
+    let image: CGImage
+    let displayFrame: CGRect
+}
+
 @MainActor
 enum CompanionScreenCaptureUtility {
 
@@ -145,6 +150,10 @@ enum CompanionScreenCaptureUtility {
     /// Skips JPEG encoding — use this for on-device detection where
     /// you need a CGImage directly (no network transfer).
     static func capturePrimaryScreenAsCGImage() async throws -> CGImage {
+        try await captureCursorScreenAsCGImage().image
+    }
+
+    static func captureCursorScreenAsCGImage() async throws -> CompanionScreenCGImageCapture {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
 
         guard !content.displays.isEmpty else {
@@ -171,6 +180,7 @@ enum CompanionScreenCaptureUtility {
             let frame = nsScreenByDisplayID[display.displayID]?.frame ?? display.frame
             return frame.contains(mouseLocation)
         } ?? content.displays[0]
+        let cursorDisplayFrame = nsScreenByDisplayID[cursorDisplay.displayID]?.frame ?? cursorDisplay.frame
 
         let filter = SCContentFilter(display: cursorDisplay, excludingWindows: ownAppWindows)
 
@@ -178,9 +188,14 @@ enum CompanionScreenCaptureUtility {
         configuration.width = cursorDisplay.width
         configuration.height = cursorDisplay.height
 
-        return try await SCScreenshotManager.captureImage(
+        let image = try await SCScreenshotManager.captureImage(
             contentFilter: filter,
             configuration: configuration
+        )
+
+        return CompanionScreenCGImageCapture(
+            image: image,
+            displayFrame: cursorDisplayFrame
         )
     }
 }

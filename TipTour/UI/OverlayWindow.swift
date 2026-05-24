@@ -99,72 +99,48 @@ struct NavigationBubbleSizePreferenceKey: PreferenceKey {
     }
 }
 
-private struct FocusHighlightBrushView: View {
+private struct FocusHighlightTrailView: View {
     let screenFrame: CGRect
     let activeGlobalPoints: [CGPoint]
     let committedContext: FocusHighlightContext?
 
     var body: some View {
-        Canvas { context, _ in
-            drawCommittedRegion(in: context)
-            drawActiveStroke(in: context)
+        TimelineView(.animation) { timeline in
+            let points = currentTrailPoints
+            CursorStreakTrailView(trailPoints: localTrailPoints(from: points))
+                .opacity(trailOpacity(at: timeline.date, pointCount: points.count))
+                .allowsHitTesting(false)
         }
-        .allowsHitTesting(false)
     }
 
-    private func drawActiveStroke(in context: GraphicsContext) {
-        let localPoints = activeGlobalPoints
+    private var currentTrailPoints: [CGPoint] {
+        if !activeGlobalPoints.isEmpty {
+            return activeGlobalPoints
+        }
+        return committedContext?.globalAppKitPoints ?? []
+    }
+
+    private func localTrailPoints(from globalPoints: [CGPoint]) -> [CGPoint] {
+        globalPoints
+            .suffix(220)
             .filter { screenFrame.insetBy(dx: -24, dy: -24).contains($0) }
             .map(localPoint)
-
-        guard localPoints.count >= 2 else { return }
-
-        var path = Path()
-        path.move(to: localPoints[0])
-        for point in localPoints.dropFirst() {
-            path.addLine(to: point)
-        }
-
-        context.stroke(
-            path,
-            with: .color(DS.Colors.overlayCursorBlue.opacity(0.28)),
-            style: StrokeStyle(lineWidth: 28, lineCap: .round, lineJoin: .round)
-        )
-        context.stroke(
-            path,
-            with: .color(Color.white.opacity(0.22)),
-            style: StrokeStyle(lineWidth: 10, lineCap: .round, lineJoin: .round)
-        )
-        context.stroke(
-            path,
-            with: .color(DS.Colors.overlayCursorBlue.opacity(0.75)),
-            style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
-        )
     }
 
-    private func drawCommittedRegion(in context: GraphicsContext) {
-        guard let committedContext else { return }
+    private func trailOpacity(at date: Date, pointCount: Int) -> Double {
+        guard pointCount >= 2 else { return 0 }
+        guard activeGlobalPoints.isEmpty,
+              let committedContext else {
+            return 1
+        }
 
-        let intersection = committedContext.globalAppKitBoundingRect.intersection(screenFrame)
-        guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { return }
+        let secondsSinceCommit = date.timeIntervalSince(committedContext.createdAt)
+        let holdSeconds: TimeInterval = 1.6
+        let fadeSeconds: TimeInterval = 7.0
+        guard secondsSinceCommit > holdSeconds else { return 1 }
 
-        let localRect = CGRect(
-            x: intersection.minX - screenFrame.minX,
-            y: screenFrame.height - (intersection.maxY - screenFrame.minY),
-            width: intersection.width,
-            height: intersection.height
-        )
-        let roundedRect = Path(roundedRect: localRect, cornerRadius: 12)
-
-        context.fill(
-            roundedRect,
-            with: .color(DS.Colors.overlayCursorBlue.opacity(0.10))
-        )
-        context.stroke(
-            roundedRect,
-            with: .color(DS.Colors.overlayCursorBlue.opacity(0.70)),
-            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round, dash: [7, 5])
-        )
+        let fadeProgress = min(1, (secondsSinceCommit - holdSeconds) / fadeSeconds)
+        return max(0, 1 - fadeProgress)
     }
 
     private func localPoint(from globalPoint: CGPoint) -> CGPoint {
@@ -313,13 +289,23 @@ struct BlueCursorView: View {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
 
-            FocusHighlightBrushView(
+            FocusHighlightTrailView(
                 screenFrame: screenFrame,
                 activeGlobalPoints: companionManager.isFocusHighlightActive
                     ? companionManager.focusHighlightGlobalPoints
                     : [],
-                committedContext: nil
+                committedContext: companionManager.lastFocusHighlightContext
             )
+
+            if companionManager.isRadialInputSwitcherVisible,
+               let radialInputSwitcherCenter = companionManager.radialInputSwitcherCenter,
+               screenFrame.contains(radialInputSwitcherCenter) {
+                RadialInputSwitcherView(
+                    highlightedOption: companionManager.highlightedRadialInputOption
+                )
+                .position(convertScreenPointToSwiftUICoordinates(radialInputSwitcherCenter))
+                .zIndex(20)
+            }
 
             if companionManager.isDetectionOverlayEnabled
                 && (companionManager.detectionOverlayDisplayFrame == nil

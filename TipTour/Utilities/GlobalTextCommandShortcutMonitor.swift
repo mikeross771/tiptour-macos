@@ -1,29 +1,14 @@
-//
-//  GlobalHighlightShortcutMonitor.swift
-//  TipTour
-//
-//  Hold control + shift and move the mouse to draw a freeform focus
-//  trail. The event tap is listen-only: it never blocks user input.
-//
-
 import AppKit
 import Combine
 import CoreGraphics
 import Foundation
 
-final class GlobalHighlightShortcutMonitor: ObservableObject {
-    enum HighlightTransition {
-        case began(CGPoint)
-        case moved(CGPoint)
-        case ended
-    }
-
-    let highlightTransitionPublisher = PassthroughSubject<HighlightTransition, Never>()
+final class GlobalTextCommandShortcutMonitor: ObservableObject {
+    let shortcutPressedPublisher = PassthroughSubject<Void, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
-
-    @Published private(set) var isHighlightShortcutCurrentlyPressed = false
+    private var isShortcutCurrentlyPressed = false
 
     deinit {
         stop()
@@ -32,12 +17,7 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
     func start() {
         guard globalEventTap == nil else { return }
 
-        let monitoredEventTypes: [CGEventType] = [
-            .flagsChanged,
-            .mouseMoved,
-            .leftMouseDragged,
-            .rightMouseDragged
-        ]
+        let monitoredEventTypes: [CGEventType] = [.keyDown, .keyUp, .flagsChanged]
         let eventMask = monitoredEventTypes.reduce(CGEventMask(0)) { currentMask, eventType in
             currentMask | (CGEventMask(1) << eventType.rawValue)
         }
@@ -47,11 +27,14 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
                 return Unmanaged.passUnretained(event)
             }
 
-            let monitor = Unmanaged<GlobalHighlightShortcutMonitor>
+            let shortcutMonitor = Unmanaged<GlobalTextCommandShortcutMonitor>
                 .fromOpaque(userInfo)
                 .takeUnretainedValue()
 
-            return monitor.handleGlobalEventTap(eventType: eventType, event: event)
+            return shortcutMonitor.handleGlobalEventTap(
+                eventType: eventType,
+                event: event
+            )
         }
 
         guard let globalEventTap = CGEvent.tapCreate(
@@ -62,7 +45,7 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
             callback: eventTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("⚠️ Global highlight: couldn't create CGEvent tap")
+            print("⚠️ Global text command: couldn't create CGEvent tap")
             return
         }
 
@@ -72,7 +55,7 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
             0
         ) else {
             CFMachPortInvalidate(globalEventTap)
-            print("⚠️ Global highlight: couldn't create event tap run loop source")
+            print("⚠️ Global text command: couldn't create event tap run loop source")
             return
         }
 
@@ -84,10 +67,7 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
     }
 
     func stop() {
-        if isHighlightShortcutCurrentlyPressed {
-            highlightTransitionPublisher.send(.ended)
-        }
-        isHighlightShortcutCurrentlyPressed = false
+        isShortcutCurrentlyPressed = false
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -111,30 +91,26 @@ final class GlobalHighlightShortcutMonitor: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
-        let isHighlightHeld = Self.isHighlightShortcutHeld(event.flags)
-        let currentMouseLocation = NSEvent.mouseLocation
-        let isMouseMovementEvent = eventType == .mouseMoved
-            || eventType == .leftMouseDragged
-            || eventType == .rightMouseDragged
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+        let isControlK = keyCode == 40
+            && modifierFlags.contains(.control)
+            && !modifierFlags.contains(.option)
+            && !modifierFlags.contains(.command)
+            && !modifierFlags.contains(.shift)
 
-        if isHighlightHeld && !isHighlightShortcutCurrentlyPressed {
-            isHighlightShortcutCurrentlyPressed = true
-            highlightTransitionPublisher.send(.began(currentMouseLocation))
-        } else if !isHighlightHeld && isHighlightShortcutCurrentlyPressed {
-            isHighlightShortcutCurrentlyPressed = false
-            highlightTransitionPublisher.send(.ended)
-        } else if isHighlightHeld && isMouseMovementEvent {
-            highlightTransitionPublisher.send(.moved(currentMouseLocation))
+        switch eventType {
+        case .keyDown where isControlK && !isShortcutCurrentlyPressed:
+            isShortcutCurrentlyPressed = true
+            shortcutPressedPublisher.send(())
+        case .keyUp, .flagsChanged:
+            if !isControlK {
+                isShortcutCurrentlyPressed = false
+            }
+        default:
+            break
         }
 
         return Unmanaged.passUnretained(event)
-    }
-
-    private static func isHighlightShortcutHeld(_ flags: CGEventFlags) -> Bool {
-        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
-        return modifierFlags.contains(.control)
-            && modifierFlags.contains(.shift)
-            && !modifierFlags.contains(.option)
-            && !modifierFlags.contains(.command)
     }
 }

@@ -2,17 +2,10 @@
 //  WorkflowPlan.swift
 //  TipTour
 //
-//  Schema for AI-generated multi-step walkthroughs. Gemini emits a
-//  structured plan (JSON) describing a multi-step workflow — we
-//  resolve and execute the steps one at a time.
+//  Schema for AI-generated single-action workflows. Gemini emits a//  structured action request (JSON); TipTour resolves and executes one//  step, then waits
 //
-//  This is the foundation for what will eventually become a full
-//  step-runner with click detection + state verification. Right now
-//  we only act on the first step (fly the cursor there) and display
-//  the rest as a preview — but the shape of the plan is already
-//  built to grow into that.
+//  The `steps` array is kept for
 //
-
 import Foundation
 import CoreGraphics
 
@@ -21,13 +14,14 @@ import CoreGraphics
 /// `wait_for_state`, `keyboard_shortcut`, etc. without breaking the
 /// schema.
 struct WorkflowStep: Codable, Identifiable, Hashable {
-    /// Stable id for SwiftUI lists and referring to this step from others.
+    /// Stable id for referring to this step in workflow state.
     /// Generated from the step index at parse time if the LLM doesn't
     /// provide one.
     let id: String
 
     /// What kind of action this step represents.
-    /// Today we execute only .click. Others are reserved for future use.
+    /// Clicks, keyboard shortcuts, typing, app launch, URL launch, and
+    /// scrolling all execute as a single accepted action.
     let type: StepType
 
     /// Human-readable label for the element, e.g. "File", "New",
@@ -243,6 +237,10 @@ private struct FlexiblePlanPayload: Codable {
         let label: String?
         let target: String?
         let element: String?
+        let targetLabel: String?
+        let target_label: String?
+        let key: String?
+        let shortcut: String?
         let hint: String?
         let description: String?
         let x: Int?
@@ -250,6 +248,7 @@ private struct FlexiblePlanPayload: Codable {
         let screenNumber: Int?
         let screen: Int?
         let value: String?
+        let text: String?
         let direction: String?
         let amount: Int?
         let by: String?
@@ -265,8 +264,8 @@ private struct FlexiblePlanPayload: Codable {
             return WorkflowStep(
                 id: s.id ?? "step_\(index + 1)",
                 type: WorkflowStep.StepType.normalized(from: s.type ?? s.action),
-                label: s.label ?? s.target ?? s.element,
-                value: s.value,
+                label: s.label ?? s.target ?? s.element ?? s.targetLabel ?? s.target_label ?? s.key ?? s.shortcut,
+                value: s.value ?? s.text,
                 direction: s.direction,
                 amount: s.amount,
                 by: s.by,

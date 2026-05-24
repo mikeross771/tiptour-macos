@@ -2,9 +2,9 @@
 //  CompanionPanelView.swift
 //  TipTour
 //
-//  SwiftUI content hosted inside the menu bar panel. Minimal layout:
-//  status header, permissions setup or hotkey hint, optional workflow
-//  checklist, API key setup, toggles, developer section, footer.
+//  SwiftUI content hosted inside the menu bar panel. The normal surface is
+//  intentionally pointer-first; provider keys and debug switches live behind
+//  the footer setup drawer.
 //  Dark aesthetic via DS.
 //
 
@@ -13,7 +13,6 @@ import SwiftUI
 
 struct CompanionPanelView: View {
     @ObservedObject var companionManager: CompanionManager
-    @ObservedObject private var workflowRunner: WorkflowRunner = .shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -22,21 +21,9 @@ struct CompanionPanelView: View {
                 .background(DS.Colors.borderSubtle)
                 .padding(.horizontal, 16)
 
-            permissionsCopySection
+            primaryMessageSection
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
-
-            Spacer().frame(height: 12)
-            geminiAPIKeySection
-                .padding(.horizontal, 16)
-
-            if companionManager.isMultiStepTourGuideEnabled,
-               let activePlan = workflowRunner.activePlan,
-               !activePlan.steps.isEmpty {
-                Spacer().frame(height: 12)
-                planChecklistSection(plan: activePlan)
-                    .padding(.horizontal, 16)
-            }
 
             if !companionManager.allPermissionsGranted {
                 Spacer().frame(height: 16)
@@ -51,23 +38,8 @@ struct CompanionPanelView: View {
             }
 
             if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-                Spacer().frame(height: 14)
-                    .padding(.horizontal, 16)
-
-                Spacer().frame(height: 4)
-                autopilotToggleRow
-                    .padding(.horizontal, 16)
-                Spacer().frame(height: 6)
-                screenshotStreamingToggleRow
-                    .padding(.horizontal, 16)
-                Spacer().frame(height: 6)
-                accurateGroundingToggleRow
-                    .padding(.horizontal, 16)
-                Spacer().frame(height: 6)
-                connectionsSection
-                    .padding(.horizontal, 16)
-                Spacer().frame(height: 6)
-                nekoModeToggleRow
+                Spacer().frame(height: 12)
+                readyControlSection
                     .padding(.horizontal, 16)
             }
 
@@ -81,7 +53,7 @@ struct CompanionPanelView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
         }
-        .frame(width: 320)
+        .frame(width: 300)
         .background(panelBackground)
     }
 
@@ -159,13 +131,13 @@ struct CompanionPanelView: View {
             : "Pin: panel will stay open when you click outside")
     }
 
-    // MARK: - Permissions Copy
+    // MARK: - Primary Message
 
     @ViewBuilder
-    private var permissionsCopySection: some View {
+    private var primaryMessageSection: some View {
         if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
-            Text("Hold Control + Option to talk.")
-                .font(.system(size: 12, weight: .medium))
+            Text("Ctrl+K to type. Ctrl+Option to speak.")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(DS.Colors.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if companionManager.allPermissionsGranted {
@@ -191,7 +163,7 @@ struct CompanionPanelView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("Hold Control+Option, ask anything about what's on your screen, and I'll point right at it.")
+                Text("Ask for one thing on screen. I'll move the pointer there, click or type, then observe what changed.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -204,6 +176,123 @@ struct CompanionPanelView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    // MARK: - Ready Controls
+
+    private var readyControlSection: some View {
+        VStack(spacing: 8) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: 8),
+                    GridItem(.flexible(), spacing: 8)
+                ],
+                spacing: 8
+            ) {
+                compactControlButton(
+                    title: companionManager.isAutopilotEnabled ? "Auto-click" : "Point only",
+                    subtitle: companionManager.isAutopilotEnabled ? "acts" : "guides",
+                    systemImage: companionManager.isAutopilotEnabled ? "wand.and.stars" : "hand.tap",
+                    isActive: companionManager.isAutopilotEnabled,
+                    helpText: companionManager.isAutopilotEnabled
+                        ? "TipTour clicks and types after grounding one action"
+                        : "TipTour points at the target and waits for you"
+                ) {
+                    companionManager.setAutopilotEnabled(!companionManager.isAutopilotEnabled)
+                }
+
+                compactControlButton(
+                    title: companionManager.isAccurateGroundingEnabled ? "Local" : "AX/DOM",
+                    subtitle: "grounding",
+                    systemImage: "scope",
+                    isActive: companionManager.isAccurateGroundingEnabled,
+                    helpText: "Toggle local YOLO/OCR grounding"
+                ) {
+                    companionManager.setAccurateGroundingEnabled(!companionManager.isAccurateGroundingEnabled)
+                }
+
+                compactControlButton(
+                    title: companionManager.isScreenshotStreamingEnabled ? "Screens" : "Private",
+                    subtitle: companionManager.isScreenshotStreamingEnabled ? "remote" : "local",
+                    systemImage: companionManager.isScreenshotStreamingEnabled ? "eye" : "eye.slash",
+                    isActive: companionManager.isScreenshotStreamingEnabled,
+                    helpText: "Toggle remote screenshot context"
+                ) {
+                    companionManager.setScreenshotStreamingEnabled(!companionManager.isScreenshotStreamingEnabled)
+                }
+
+                compactControlButton(
+                    title: companionManager.isHermesOrchestratorEnabled ? "Hermes" : "Local",
+                    subtitle: companionManager.isHermesOrchestratorEnabled ? "delegate" : "planner",
+                    systemImage: companionManager.isHermesOrchestratorEnabled ? "link" : "bolt",
+                    isActive: companionManager.isHermesOrchestratorEnabled,
+                    helpText: "Toggle Hermes orchestration"
+                ) {
+                    companionManager.setHermesOrchestratorEnabled(!companionManager.isHermesOrchestratorEnabled)
+                }
+            }
+
+            if let activityText = companionManager.textCommandActivityText, !activityText.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.55)
+                    Text(activityText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
+            }
+        }
+    }
+
+    private func compactControlButton(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        isActive: Bool,
+        helpText: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(isActive ? DS.Colors.accent : DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(DS.Colors.textSecondary)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(DS.Colors.textTertiary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(minHeight: 42)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isActive ? DS.Colors.accent.opacity(0.11) : Color.white.opacity(0.04))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isActive ? DS.Colors.accent.opacity(0.28) : DS.Colors.borderSubtle, lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .pointerCursor()
+        .help(helpText)
     }
 
     // MARK: - Start Button
@@ -253,7 +342,7 @@ struct CompanionPanelView: View {
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .padding(.top, 1)
-                    Text("Everything stays on your Mac. Screenshots and audio are only sent to Gemini when you hold ⌃⌥ to talk.")
+                    Text("Everything stays on your Mac until you talk. Audio and optional screenshots are sent only to Gemini Live.")
                         .font(.system(size: 10))
                         .foregroundColor(DS.Colors.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -713,268 +802,6 @@ struct CompanionPanelView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Plan Checklist
-
-    /// Minimal checklist shown while a workflow plan is active. Lists every
-    /// step with the current one highlighted.
-    private func planChecklistSection(plan: WorkflowPlan) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
-                Text(plan.goal)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(DS.Colors.textPrimary)
-                    .lineLimit(1)
-                Spacer()
-                if let app = plan.app, !app.isEmpty {
-                    Text(app)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.white.opacity(0.06))
-                        )
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(plan.steps.enumerated()), id: \.element.id) { index, step in
-                    planChecklistRow(
-                        step: step,
-                        index: index,
-                        isCurrent: index == workflowRunner.activeStepIndex
-                    )
-                }
-            }
-
-            if let failureLabel = workflowRunner.currentStepResolutionFailureLabel {
-                planResolutionFailurePrompt(failureLabel: failureLabel)
-            }
-
-            Divider()
-                .background(DS.Colors.borderSubtle)
-                .padding(.top, 2)
-
-            planControlsRow
-
-            advanceOnAnyClickDebugToggleRow
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.white.opacity(0.04))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-        )
-    }
-
-    /// Debug switch that tells ClickDetector to advance on any click.
-    private var advanceOnAnyClickDebugToggleRow: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "ladybug")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
-            Text("Advance on any click")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(DS.Colors.textTertiary)
-            Spacer()
-            Toggle("", isOn: Binding(
-                get: { companionManager.advanceOnAnyClickEnabled },
-                set: { companionManager.setAdvanceOnAnyClickEnabled($0) }
-            ))
-            .toggleStyle(.switch)
-            .labelsHidden()
-            .tint(DS.Colors.accent)
-            .scaleEffect(0.7)
-        }
-    }
-
-    private struct PlanControlButtonStyle: ButtonStyle {
-        let isPrimary: Bool
-
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .foregroundColor(isPrimary ? .white : DS.Colors.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(isPrimary
-                              ? DS.Colors.accent.opacity(configuration.isPressed ? 0.7 : 1.0)
-                              : Color.white.opacity(configuration.isPressed ? 0.14 : 0.08))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
-                )
-                .onHover { isHovering in
-                    if isHovering { NSCursor.pointingHand.push() }
-                    else { NSCursor.pop() }
-                }
-        }
-    }
-
-    private func planChecklistRow(step: WorkflowStep, index: Int, isCurrent: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("\(index + 1)")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundColor(isCurrent ? .white : DS.Colors.textTertiary)
-                .frame(width: 18, height: 18)
-                .background(
-                    Circle().fill(isCurrent ? DS.Colors.accent : Color.white.opacity(0.06))
-                )
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(step.label ?? "(unlabeled)")
-                        .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
-                        .foregroundColor(isCurrent ? DS.Colors.textPrimary : DS.Colors.textSecondary)
-                        .lineLimit(1)
-
-                    if isCurrent && workflowRunner.isResolvingCurrentStep {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                            .scaleEffect(0.5)
-                            .frame(width: 12, height: 12)
-                    }
-                }
-                if !step.hint.isEmpty {
-                    Text(step.hint)
-                        .font(.system(size: 10))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .lineLimit(2)
-                }
-            }
-        }
-    }
-
-    private func planResolutionFailurePrompt(failureLabel: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.orange)
-
-            Text("Can't find \"\(failureLabel)\"")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(DS.Colors.textSecondary)
-                .lineLimit(1)
-
-            Spacer()
-
-            Button("Retry") {
-                workflowRunner.retryCurrentStep()
-            }
-            .buttonStyle(PlanControlButtonStyle(isPrimary: false))
-
-            Button("Skip") {
-                workflowRunner.skipCurrentStep()
-            }
-            .buttonStyle(PlanControlButtonStyle(isPrimary: true))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.orange.opacity(0.10))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(Color.orange.opacity(0.35), lineWidth: 0.5)
-        )
-    }
-
-    private var planControlsRow: some View {
-        HStack(spacing: 8) {
-            Button(role: .destructive) {
-                workflowRunner.stop()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 9, weight: .semibold))
-                    Text("Stop")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-            }
-            .buttonStyle(PlanControlButtonStyle(isPrimary: false))
-
-            Spacer()
-
-            Button {
-                workflowRunner.skipCurrentStep()
-            } label: {
-                HStack(spacing: 4) {
-                    Text("Skip step")
-                        .font(.system(size: 11, weight: .medium))
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 9, weight: .semibold))
-                }
-            }
-            .buttonStyle(PlanControlButtonStyle(isPrimary: true))
-        }
-    }
-
-    // MARK: - Gemini API Key
-
-    @State private var devGeminiKeyInput: String = ""
-    @State private var devGeminiKeyStatus: String = ""
-
-    private var geminiAPIKeySection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "key.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(hasSavedGeminiKey ? DS.Colors.accent : DS.Colors.warning)
-
-                Text("Gemini API key")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(DS.Colors.textSecondary)
-
-                Spacer()
-
-                Text(hasSavedGeminiKey ? "Saved" : "Required")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(hasSavedGeminiKey ? DS.Colors.success : DS.Colors.warning)
-            }
-
-            byokKeyRow(
-                title: "Key",
-                placeholder: "AIzaSy…",
-                input: $devGeminiKeyInput,
-                save: {
-                    KeychainStore.geminiAPIKey = devGeminiKeyInput
-                },
-                clear: {
-                    devGeminiKeyInput = ""
-                    KeychainStore.geminiAPIKey = nil
-                },
-                status: $devGeminiKeyStatus,
-                hasSavedKey: hasSavedGeminiKey
-            )
-            .padding(.horizontal, -10)
-
-            if !devGeminiKeyStatus.isEmpty {
-                Text(devGeminiKeyStatus)
-                    .font(.system(size: 10))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .transition(.opacity)
-            }
-        }
-        .onAppear {
-            devGeminiKeyInput = KeychainStore.geminiAPIKey ?? ""
-        }
-    }
-
-    private var hasSavedGeminiKey: Bool {
-        !(KeychainStore.geminiAPIKey ?? "").isEmpty
-    }
-
     // MARK: - Footer
 
     private var feedbackButton: some View {
@@ -983,19 +810,15 @@ struct CompanionPanelView: View {
                 NSWorkspace.shared.open(url)
             }
         }) {
-            HStack(spacing: 5) {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 10))
-                Text("Feedback")
-                    .font(.system(size: 11))
-            }
-            .foregroundColor(DS.Colors.textTertiary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            Image(systemName: "bubble.left")
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 24, height: 24)
+                .foregroundColor(DS.Colors.textTertiary)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
+        .help("Feedback")
     }
 
     private var footerSection: some View {
@@ -1003,17 +826,13 @@ struct CompanionPanelView: View {
             HStack(spacing: 0) {
                 feedbackButton
 
-                // Always-visible Dev button — gives shipped users access to
-                // the voice-backend picker and BYOK key inputs. The truly
-                // debug-only rows (Detection Overlay, Test Cursor Flight,
-                // Reset All) stay #if DEBUG-gated inside the section.
-                footerButton("Dev", systemImage: "wrench", toggled: showDevTools) {
+                footerIconButton("Setup", systemImage: "slider.horizontal.3", toggled: showDevTools) {
                     showDevTools.toggle()
                 }
 
                 Spacer()
 
-                footerButton("Quit", systemImage: "power") {
+                footerIconButton("Quit", systemImage: "power") {
                     NSApp.terminate(nil)
                 }
             }
@@ -1025,119 +844,49 @@ struct CompanionPanelView: View {
         }
     }
 
-    private func footerButton(
+    private func footerIconButton(
         _ title: String,
         systemImage: String,
         toggled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 10))
-                Text(title)
-                    .font(.system(size: 11))
-            }
-            .foregroundColor(toggled ? DS.Colors.textSecondary : DS.Colors.textTertiary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .medium))
+                .frame(width: 24, height: 24)
+                .foregroundColor(toggled ? DS.Colors.textSecondary : DS.Colors.textTertiary)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .pointerCursor()
+        .help(title)
     }
 
     // MARK: - Dev Tools
 
-    /// Internal debug rows. The Gemini key entry is intentionally exposed
-    /// in the normal panel setup instead of being hidden here.
+    /// Setup and debug rows. Keeping these out of the primary surface keeps
+    /// the menu bar focused on the pointer-agent loop.
     @State private var showDevTools: Bool = false
-
-    /// One-line bring-your-own-key row. Icon + label on the left, a
-    /// SecureField that grows to fill, and a single trailing icon button
-    /// that toggles between Save (when there's input) and Clear (when a
-    /// key is already saved). Status flashes briefly after either action.
-    private func byokKeyRow(
-        title: String,
-        placeholder: String,
-        input: Binding<String>,
-        save: @escaping () -> Void,
-        clear: @escaping () -> Void,
-        status: Binding<String>,
-        hasSavedKey: Bool
-    ) -> some View {
-        let trimmedInput = input.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let saveDisabled = trimmedInput.isEmpty
-        return HStack(spacing: 8) {
-            Image(systemName: "key")
-                .font(.system(size: 10))
-                .foregroundColor(hasSavedKey ? DS.Colors.accent : DS.Colors.textTertiary)
-                .frame(width: 16)
-
-            Text(title)
-                .font(.system(size: 11))
-                .foregroundColor(DS.Colors.textSecondary)
-                .frame(width: 70, alignment: .leading)
-
-            SecureField(placeholder, text: input)
-                .textFieldStyle(.plain)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(DS.Colors.textPrimary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color.white.opacity(0.05))
-                )
-
-            Button {
-                save()
-                status.wrappedValue = "Saved"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    if status.wrappedValue == "Saved" { status.wrappedValue = "" }
-                }
-            } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(saveDisabled ? DS.Colors.textTertiary : .white)
-                    .frame(width: 22, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(saveDisabled ? Color.white.opacity(0.06) : DS.Colors.accent)
-                    )
-            }
-            .buttonStyle(.plain)
-            .disabled(saveDisabled)
-            .pointerCursor()
-            .help("Save")
-
-            Button {
-                clear()
-                status.wrappedValue = "Cleared"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    if status.wrappedValue == "Cleared" { status.wrappedValue = "" }
-                }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(DS.Colors.textTertiary)
-                    .frame(width: 22, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Color.white.opacity(0.06))
-                    )
-            }
-            .buttonStyle(.plain)
-            .pointerCursor()
-            .help("Clear")
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-    }
 
     private var devToolsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
+            sectionHeader("SETUP")
+            ProviderSetupView(companionManager: companionManager)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+
+            sectionHeader("ADVANCED")
+            accurateGroundingToggleRow
+                .padding(.horizontal, 10)
+            screenshotStreamingToggleRow
+                .padding(.horizontal, 10)
+            connectionsSection
+                .padding(.horizontal, 10)
+            nekoModeToggleRow
+                .padding(.horizontal, 10)
+
             #if DEBUG
+            Spacer().frame(height: 6)
             sectionHeader("DEBUG")
 
             devToolRow("Test Cursor Flight", systemImage: "arrow.up.right") {
