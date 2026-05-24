@@ -8,6 +8,7 @@
 //
 
 import ApplicationServices
+import AVFoundation
 import Combine
 import CuaDriverCore
 import Foundation
@@ -2470,6 +2471,8 @@ final class CompanionManager: ObservableObject {
             do {
                 try await voiceBackend.start(initialScreenshot: nil)
             } catch {
+                voiceState = .idle
+                lastTranscript = error.localizedDescription
                 print("[GeminiLive] Failed to start session: \(error.localizedDescription)")
             }
         }
