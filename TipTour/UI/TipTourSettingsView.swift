@@ -171,18 +171,6 @@ struct TipTourSettingsView: View {
             )
 
             settingsRow(
-                title: "OmniParser",
-                subtitle: companionManager.isOmniParserHarnessEnabled
-                    ? "Parsed UI elements can enrich local grounding targets."
-                    : "Use TipTour's built-in AX, DOM, YOLO, and OCR grounding.",
-                systemImage: "rectangle.3.group",
-                isOn: Binding(
-                    get: { companionManager.isOmniParserHarnessEnabled },
-                    set: { companionManager.setOmniParserHarnessEnabled($0) }
-                )
-            )
-
-            settingsRow(
                 title: "Pipecat Voice",
                 subtitle: "Local sidecar health is checked when you enable it.",
                 systemImage: "dot.radiowaves.left.and.right",

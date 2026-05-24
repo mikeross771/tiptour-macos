@@ -159,7 +159,7 @@ struct HermesAgentClient {
     - POST http://127.0.0.1:19474/v1/plan-next-action
     - POST http://127.0.0.1:19474/v1/workflow-plan
 
-    /v1/targets is the single target graph. It may contain AX/CDP/native OCR/YOLO targets and optional OmniParser parser targets. Prefer target_id or target_mark from that response over fuzzy text labels.
+    /v1/targets is the single target graph. It may contain AX/CDP/native OCR/YOLO targets. Prefer target_id or target_mark from that response over fuzzy text labels.
 
     Check /v1/skills/active when an app has quirks. Use those markdown skill instructions as app-specific guidance, but still execute through TipTour's one-action endpoints.
 

@@ -6,7 +6,7 @@ import CoreImage
 import AppKit
 
 /// Native on-device element detector using CoreML (YOLO) + Apple Vision (OCR).
-/// Replaces the Python OmniParser server — no external dependencies needed.
+/// Provides local screen understanding with no external sidecar dependency.
 ///
 /// YOLO detects UI element bounding boxes (buttons, icons, menus).
 /// Vision framework detects text on screen (labels, menu items, button text).

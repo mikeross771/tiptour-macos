@@ -55,7 +55,6 @@ final class CompanionManager: ObservableObject {
 
     @Published var isCuaActionDriverEnabled: Bool = TipTourDefaults.isCuaActionDriverEnabled
     @Published var isHermesOrchestratorEnabled: Bool = TipTourDefaults.isHermesOrchestratorEnabled
-    @Published var isOmniParserHarnessEnabled: Bool = TipTourDefaults.isOmniParserHarnessEnabled
     @Published var isPipecatVoiceHarnessEnabled: Bool = TipTourDefaults.isPipecatVoiceHarnessEnabled
 
     /// Whether the blue cursor overlay is currently visible on screen.
@@ -98,10 +97,8 @@ final class CompanionManager: ObservableObject {
     private var voiceModelSpeakingCancellable: AnyCancellable?
     private let claudeActionPlannerClient = ClaudeActionPlannerClient()
     private let hermesAgentClient = HermesAgentClient()
-    private let omniParserHarnessClient = OmniParserHarnessClient()
     private let pipecatVoiceHarnessClient = PipecatVoiceHarnessClient()
     private var hermesSessionID: String?
-    private var lastOmniParserHarnessFailureLogDate: Date = .distantPast
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     private var detectionOverlayTask: Task<Void, Never>?
     private var postActionDetectionRefreshTask: Task<Void, Never>?
@@ -119,7 +116,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private var shouldRunNativeDetection: Bool {
-        isAccurateGroundingEnabled || isDetectionOverlayEnabled || isOmniParserHarnessEnabled
+        isAccurateGroundingEnabled || isDetectionOverlayEnabled
     }
 
     private lazy var engineFacade = TipTourEngine(
@@ -137,9 +134,6 @@ final class CompanionManager: ObservableObject {
         },
         isHermesOrchestratorEnabledProvider: { [weak self] in
             self?.isHermesOrchestratorEnabled ?? false
-        },
-        isOmniParserHarnessEnabledProvider: { [weak self] in
-            self?.isOmniParserHarnessEnabled ?? false
         },
         detectionElementCountProvider: {
             LocalPerceptionTargetCache.shared.freshTargetCount()
@@ -718,25 +712,6 @@ final class CompanionManager: ObservableObject {
         TipTourDefaults.isHermesOrchestratorEnabled = enabled
     }
 
-    func setOmniParserHarnessEnabled(_ enabled: Bool) {
-        isOmniParserHarnessEnabled = enabled
-        TipTourDefaults.isOmniParserHarnessEnabled = enabled
-
-        if enabled {
-            startNativeDetection()
-            Task {
-                do {
-                    let health = try await omniParserHarnessClient.health()
-                    print("[OmniParserHarness] health ok=\(health.ok) service=\(health.service ?? "unknown")")
-                } catch {
-                    print("[OmniParserHarness] enabled, but local sidecar is not reachable yet: \(error.localizedDescription)")
-                }
-            }
-        } else if !shouldRunNativeDetection {
-            stopNativeDetection()
-        }
-    }
-
     func setPipecatVoiceHarnessEnabled(_ enabled: Bool) {
         isPipecatVoiceHarnessEnabled = enabled
         TipTourDefaults.isPipecatVoiceHarnessEnabled = enabled
@@ -767,13 +742,6 @@ final class CompanionManager: ObservableObject {
                 kind: .orchestrator,
                 description: "Optional long-running reasoning, memory, skills, and external tool orchestration.",
                 isEnabled: isHermesOrchestratorEnabled
-            ),
-            TipTourConnection(
-                id: "omniparser-harness",
-                displayName: "OmniParser",
-                kind: .parser,
-                description: "Optional local screen parser sidecar. Merges richer parsed UI elements into TipTour grounding targets.",
-                isEnabled: isOmniParserHarnessEnabled
             ),
             TipTourConnection(
                 id: "pipecat-voice-harness",
@@ -1089,10 +1057,6 @@ final class CompanionManager: ObservableObject {
                     "source": detectedElement.source
                 ] as [String: Any]
             }
-            if isOmniParserHarnessEnabled {
-                overlayElements.append(contentsOf: await omniParserOverlayElements(in: capturedImage))
-            }
-
             guard shouldRunNativeDetection else { return }
             detectionOverlayImageSize = [capturedImage.width, capturedImage.height]
             if isDetectionOverlayEnabled {
@@ -1108,43 +1072,6 @@ final class CompanionManager: ObservableObject {
             print("[NativeDetector] overlay refreshed — \(reason)")
         } catch {
             print("[NativeDetector] overlay capture failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func omniParserOverlayElements(in capturedImage: CGImage) async -> [[String: Any]] {
-        do {
-            let parsedElements = try await omniParserHarnessClient.parse(cgImage: capturedImage)
-            guard !parsedElements.isEmpty else { return [] }
-            print("[OmniParserHarness] \(parsedElements.count) elements parsed")
-            return parsedElements.compactMap { parsedElement in
-                guard parsedElement.bbox.count == 4 else { return nil }
-                let minX = min(parsedElement.bbox[0], parsedElement.bbox[2])
-                let minY = min(parsedElement.bbox[1], parsedElement.bbox[3])
-                let maxX = max(parsedElement.bbox[0], parsedElement.bbox[2])
-                let maxY = max(parsedElement.bbox[1], parsedElement.bbox[3])
-                return [
-                    "bbox": [
-                        Int(minX.rounded()),
-                        Int(minY.rounded()),
-                        Int(maxX.rounded()),
-                        Int(maxY.rounded())
-                    ],
-                    "center": [
-                        Int(((minX + maxX) / 2).rounded()),
-                        Int(((minY + maxY) / 2).rounded())
-                    ],
-                    "conf": parsedElement.normalizedConfidence,
-                    "label": parsedElement.label ?? "",
-                    "source": parsedElement.normalizedSource
-                ] as [String: Any]
-            }
-        } catch {
-            let now = Date()
-            if now.timeIntervalSince(lastOmniParserHarnessFailureLogDate) > 20 {
-                lastOmniParserHarnessFailureLogDate = now
-                print("[OmniParserHarness] parse unavailable: \(error.localizedDescription)")
-            }
-            return []
         }
     }
 

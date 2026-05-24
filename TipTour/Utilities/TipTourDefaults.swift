@@ -18,7 +18,6 @@ enum TipTourDefaults {
         case isDetectionOverlayEnabled
         case isHermesOrchestratorEnabled
         case isNekoModeEnabled
-        case isOmniParserHarnessEnabled
         case isPanelPinned
         case isPipecatVoiceHarnessEnabled
         case isScreenshotStreamingEnabled
@@ -37,7 +36,6 @@ enum TipTourDefaults {
             Key.isDetectionOverlayEnabled.rawValue: false,
             Key.isHermesOrchestratorEnabled.rawValue: false,
             Key.isNekoModeEnabled.rawValue: false,
-            Key.isOmniParserHarnessEnabled.rawValue: false,
             Key.isPanelPinned.rawValue: false,
             Key.isPipecatVoiceHarnessEnabled.rawValue: false,
             Key.isScreenshotStreamingEnabled.rawValue: true
@@ -89,11 +87,6 @@ enum TipTourDefaults {
         set { set(newValue, for: .isNekoModeEnabled) }
     }
 
-    static var isOmniParserHarnessEnabled: Bool {
-        get { bool(for: .isOmniParserHarnessEnabled) }
-        set { set(newValue, for: .isOmniParserHarnessEnabled) }
-    }
-
     static var isPanelPinned: Bool {
         get { bool(for: .isPanelPinned) }
         set { set(newValue, for: .isPanelPinned) }
@@ -135,7 +128,6 @@ enum TipTourDefaults {
              .isDetectionOverlayEnabled,
              .isHermesOrchestratorEnabled,
              .isNekoModeEnabled,
-             .isOmniParserHarnessEnabled,
              .isPanelPinned,
              .isPipecatVoiceHarnessEnabled:
             return false

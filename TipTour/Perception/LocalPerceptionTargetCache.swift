@@ -442,7 +442,6 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
 
     private func sourcePriority(_ source: String) -> Int {
         if source == "ocr" { return 4 }
-        if source.hasPrefix("omniparser") { return 3 }
         return 1
     }
 }

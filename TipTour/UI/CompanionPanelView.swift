@@ -719,18 +719,6 @@ struct CompanionPanelView: View {
             )
 
             connectionToggleRow(
-                title: "OmniParser",
-                subtitle: companionManager.isOmniParserHarnessEnabled
-                    ? "parser sidecar enabled"
-                    : "native parser only",
-                systemImage: "square.stack.3d.down.right",
-                isOn: Binding(
-                    get: { companionManager.isOmniParserHarnessEnabled },
-                    set: { companionManager.setOmniParserHarnessEnabled($0) }
-                )
-            )
-
-            connectionToggleRow(
                 title: "Pipecat Voice",
                 subtitle: companionManager.isPipecatVoiceHarnessEnabled
                     ? "voice sidecar enabled"
