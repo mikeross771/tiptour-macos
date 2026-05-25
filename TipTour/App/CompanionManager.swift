@@ -2765,7 +2765,8 @@ final class CompanionManager: ObservableObject {
             .map { "\n\($0)\n" } ?? "none"
         return """
         Source: \(sourceLabel)
-        Active Mac app: \(activeApp)
+        Starting Mac app: \(activeApp)
+        Starting app is context, not a constraint. If the user names another app, switch/open that app first and continue from the new observation.
         TipTour Autopilot: \(isAutopilotEnabled ? "enabled" : "disabled")
         TipTour Accurate Grounding: \(groundingMode)
         TipTour screenshot streaming setting: \(screenshotMode)

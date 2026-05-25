@@ -25,6 +25,13 @@ enum PointerPromptRouter {
         targetAppName: String?,
         isHermesAutoEnabled: Bool
     ) -> PointerPromptRoute {
+        if isHermesAutoEnabled, looksLikeLongRunningTask(prompt) {
+            return PointerPromptRoute(
+                destination: .hermesLongTask,
+                reason: "long_running_task"
+            )
+        }
+
         if let localTargetLabel = directPointerTargetLabel(from: prompt) {
             return PointerPromptRoute(
                 destination: .localAction(
@@ -41,13 +48,6 @@ enum PointerPromptRouter {
                     )
                 ),
                 reason: "direct_pointer_command"
-            )
-        }
-
-        if isHermesAutoEnabled, looksLikeLongRunningTask(prompt) {
-            return PointerPromptRoute(
-                destination: .hermesLongTask,
-                reason: "long_running_task"
             )
         }
 
@@ -83,8 +83,7 @@ enum PointerPromptRouter {
             return nil
         }
 
-        if matchedPrefix == "open ",
-           looksLikeApplicationLaunch(lowercasedPrompt) {
+        if looksLikeApplicationLaunch(lowercasedPrompt) {
             return nil
         }
 
@@ -125,7 +124,15 @@ enum PointerPromptRouter {
             "open xcode",
             "open terminal",
             "open notes",
-            "open apple notes"
+            "open apple notes",
+            "go to blender",
+            "go to chrome",
+            "go to google chrome",
+            "go to safari",
+            "go to xcode",
+            "go to terminal",
+            "go to notes",
+            "go to apple notes"
         ]
         return applicationNames.contains { lowercasedPrompt.hasPrefix($0) }
     }
