@@ -162,6 +162,62 @@ enum BuddyNavigationMode {
     case pointingAtTarget
 }
 
+private enum PointerApproachSide {
+    case leftOfTarget
+    case rightOfTarget
+    case aboveTarget
+    case belowTarget
+    case upperLeftOfTarget
+    case upperRightOfTarget
+    case lowerLeftOfTarget
+    case lowerRightOfTarget
+
+    var targetDirectionRadians: Double {
+        switch self {
+        case .leftOfTarget:
+            return 0
+        case .rightOfTarget:
+            return .pi
+        case .aboveTarget:
+            return .pi / 2
+        case .belowTarget:
+            return -.pi / 2
+        case .upperLeftOfTarget:
+            return .pi / 4
+        case .upperRightOfTarget:
+            return .pi * 3.0 / 4.0
+        case .lowerLeftOfTarget:
+            return -.pi / 4.0
+        case .lowerRightOfTarget:
+            return -.pi * 3.0 / 4.0
+        }
+    }
+
+    var prefersBubbleOnLeft: Bool {
+        switch self {
+        case .leftOfTarget, .upperLeftOfTarget, .lowerLeftOfTarget:
+            return true
+        case .rightOfTarget, .aboveTarget, .belowTarget, .upperRightOfTarget, .lowerRightOfTarget:
+            return false
+        }
+    }
+
+    var isCornerPose: Bool {
+        switch self {
+        case .upperLeftOfTarget, .upperRightOfTarget, .lowerLeftOfTarget, .lowerRightOfTarget:
+            return true
+        case .leftOfTarget, .rightOfTarget, .aboveTarget, .belowTarget:
+            return false
+        }
+    }
+}
+
+private struct PointerLandingPose {
+    let center: CGPoint
+    let rotationDegrees: Double
+    let side: PointerApproachSide
+}
+
 // SwiftUI view for the blue glowing cursor pointer.
 // Each screen gets its own BlueCursorView. The view checks whether
 // the cursor is currently on THIS screen and only shows the buddy
@@ -228,6 +284,9 @@ struct BlueCursorView: View {
     @State private var navigationBubbleText: String = ""
     @State private var navigationBubbleOpacity: Double = 0.0
     @State private var navigationBubbleSize: CGSize = .zero
+    @State private var navigationPointerApproachSide: PointerApproachSide = .rightOfTarget
+    @State private var navigationPointingRotationDegrees: Double = 0.0
+    @State private var isPointerBreathing: Bool = false
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
@@ -389,9 +448,8 @@ struct BlueCursorView: View {
                     }
             }
 
-            // Navigation pointer bubble — shown when buddy arrives at a detected element.
-            // Pops in with a scale-bounce (0.5x → 1.0x spring) and a bright initial
-            // glow that settles, creating a "materializing" effect.
+            // Navigation pointer bubble — shown only after the buddy has
+            // landed and softly settled near the target.
             if buddyNavigationMode == .pointingAtTarget && !navigationBubbleText.isEmpty {
                 Text(navigationBubbleText)
                     .font(.system(size: 11, weight: .medium))
@@ -416,13 +474,9 @@ struct BlueCursorView: View {
                     )
                     .scaleEffect(navigationBubbleScale)
                     .opacity(navigationBubbleOpacity)
-                    .position(
-                        x: cursorPosition.x + bubbleLeftOffsetFromCursor + (navigationBubbleSize.width / 2),
-                        y: cursorPosition.y + bubbleTopOffsetFromCursor
-                    )
-                    .animation(.spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0), value: cursorPosition)
-                    .animation(.spring(response: 0.4, dampingFraction: 0.6), value: navigationBubbleScale)
-                    .animation(.easeOut(duration: 0.5), value: navigationBubbleOpacity)
+                    .position(navigationBubblePosition())
+                    .animation(.easeInOut(duration: 0.22), value: navigationBubbleScale)
+                    .animation(.easeOut(duration: 0.28), value: navigationBubbleOpacity)
                     .onPreferenceChange(NavigationBubbleSizePreferenceKey.self) { newSize in
                         navigationBubbleSize = newSize
                     }
@@ -462,8 +516,9 @@ struct BlueCursorView: View {
                     value: cursorPosition
                 )
             } else {
-                // During navigation: NO implicit animation — the frame-by-frame bezier
-                // timer controls position directly at 60fps for a smooth arc flight.
+                // During navigation: NO implicit position animation. The
+                // time-based flight loop owns every point so SwiftUI does
+                // not fight it with a second animation system.
                 ZStack {
                     CursorArrowShape()
                         .fill(DS.Colors.overlayCursorBlue)
@@ -484,19 +539,24 @@ struct BlueCursorView: View {
                     .frame(width: 44, height: 44)
                     .rotationEffect(.degrees(triangleRotationDegrees))
                     .opacity(buddyIsVisibleOnThisScreen ? cursorOpacity : 0)
-                    .scaleEffect(buddyFlightScale)
+                    .scaleEffect(
+                        buddyNavigationMode == .pointingAtTarget && isPointerBreathing
+                            ? 1.035
+                            : buddyFlightScale
+                    )
                     .position(cursorPosition)
                     .animation(
                         buddyNavigationMode == .followingCursor
-                            ? .spring(response: 0.2, dampingFraction: 0.6, blendDuration: 0)
+                            ? .spring(response: 0.24, dampingFraction: 0.74, blendDuration: 0)
                             : nil,
                         value: cursorPosition
                     )
                     .animation(.easeIn(duration: 0.25), value: companionManager.voiceState)
                     .animation(
-                        buddyNavigationMode == .navigatingToTarget ? nil : .easeInOut(duration: 0.3),
-                        value: triangleRotationDegrees
+                        .easeInOut(duration: 1.4).repeatForever(autoreverses: true),
+                        value: isPointerBreathing
                     )
+                    .animation(nil, value: triangleRotationDegrees)
             }
 
             // Audio/transcript pill — floats next to the cursor and stays
@@ -714,6 +774,23 @@ struct BlueCursorView: View {
         return CGPoint(x: x, y: y)
     }
 
+    private func navigationBubblePosition() -> CGPoint {
+        let horizontalOffset = bubbleLeftOffsetFromCursor + navigationBubbleSize.width / 2
+        let verticalOffset = bubbleTopOffsetFromCursor
+
+        if navigationPointerApproachSide.prefersBubbleOnLeft {
+            return CGPoint(
+                x: cursorPosition.x - horizontalOffset,
+                y: cursorPosition.y + verticalOffset
+            )
+        }
+
+        return CGPoint(
+            x: cursorPosition.x + horizontalOffset,
+            y: cursorPosition.y + verticalOffset
+        )
+    }
+
     // MARK: - Element Navigation
 
     /// Starts animating the buddy toward a detected UI element location.
@@ -723,19 +800,7 @@ struct BlueCursorView: View {
 
         // Convert the AppKit screen location to SwiftUI coordinates for this screen
         let targetInSwiftUI = convertScreenPointToSwiftUICoordinates(screenLocation)
-
-        // Offset the target so the buddy sits beside the element rather than
-        // directly on top of it — 8px to the right, 12px below.
-        let offsetTarget = CGPoint(
-            x: targetInSwiftUI.x + 8,
-            y: targetInSwiftUI.y + 12
-        )
-
-        // Clamp target to screen bounds with padding
-        let clampedTarget = CGPoint(
-            x: max(20, min(offsetTarget.x, screenFrame.width - 20)),
-            y: max(20, min(offsetTarget.y, screenFrame.height - 20))
-        )
+        let landingPose = pointerLandingPose(for: targetInSwiftUI)
 
         // Record the current cursor position so we can detect if the user
         // moves the mouse enough to cancel the return flight
@@ -745,19 +810,115 @@ struct BlueCursorView: View {
         // Enter navigation mode — stop cursor following
         buddyNavigationMode = .navigatingToTarget
         isReturningToCursor = false
+        isPointerBreathing = false
+        navigationPointerApproachSide = landingPose.side
+        navigationPointingRotationDegrees = landingPose.rotationDegrees
 
-        animateBezierFlightArc(to: clampedTarget) {
+        animateBezierFlightArc(to: landingPose.center, landingRotationDegrees: landingPose.rotationDegrees) {
             guard self.buddyNavigationMode == .navigatingToTarget else { return }
             self.startPointingAtElement()
         }
     }
 
-    /// Animates the buddy along a quadratic bezier arc from its current position
-    /// to the specified destination. The arrow rotates to face its direction
-    /// of travel (tangent to the curve) each frame, scales up at the midpoint
-    /// for a "swooping" feel, and the glow intensifies during flight.
+    private func pointerLandingPose(for target: CGPoint) -> PointerLandingPose {
+        let pointerDistanceFromTarget: CGFloat = 42
+        let screenPadding: CGFloat = 34
+        let candidateSides: [PointerApproachSide] = [
+            .upperRightOfTarget,
+            .upperLeftOfTarget,
+            .lowerRightOfTarget,
+            .lowerLeftOfTarget,
+            .rightOfTarget,
+            .leftOfTarget,
+            .aboveTarget,
+            .belowTarget
+        ]
+
+        func vector(for side: PointerApproachSide) -> CGVector {
+            let radians = side.targetDirectionRadians
+            return CGVector(dx: cos(radians), dy: sin(radians))
+        }
+
+        func clamped(_ point: CGPoint) -> CGPoint {
+            CGPoint(
+                x: max(screenPadding, min(point.x, screenFrame.width - screenPadding)),
+                y: max(screenPadding, min(point.y, screenFrame.height - screenPadding))
+            )
+        }
+
+        let bestCandidate = candidateSides
+            .map { side -> (side: PointerApproachSide, center: CGPoint, score: CGFloat) in
+                let targetDirection = vector(for: side)
+                let idealCenter = CGPoint(
+                    x: target.x - targetDirection.dx * pointerDistanceFromTarget,
+                    y: target.y - targetDirection.dy * pointerDistanceFromTarget
+                )
+                let center = clamped(idealCenter)
+                let clampPenalty = hypot(center.x - idealCenter.x, center.y - idealCenter.y) * 4.0
+                let travelPenalty = hypot(center.x - cursorPosition.x, center.y - cursorPosition.y) * 0.08
+                let horizontalBonus: CGFloat = {
+                    switch side {
+                    case .upperLeftOfTarget, .upperRightOfTarget, .lowerLeftOfTarget, .lowerRightOfTarget:
+                        return 28
+                    case .leftOfTarget, .rightOfTarget:
+                        return 18
+                    case .aboveTarget, .belowTarget:
+                        return 0
+                    }
+                }()
+                let cornerPenalty: CGFloat = side.isCornerPose ? 0 : 8
+                let targetClearance = min(
+                    target.x,
+                    screenFrame.width - target.x,
+                    target.y,
+                    screenFrame.height - target.y
+                ) * 0.02
+                return (
+                    side: side,
+                    center: center,
+                    score: horizontalBonus + targetClearance - clampPenalty - travelPenalty - cornerPenalty
+                )
+            }
+            .max { lhs, rhs in lhs.score < rhs.score }
+
+        let side = bestCandidate?.side ?? .upperRightOfTarget
+        let fallbackOffset = pointerDistanceFromTarget / sqrt(2)
+        let center = bestCandidate?.center ?? clamped(
+            CGPoint(x: target.x + fallbackOffset, y: target.y - fallbackOffset)
+        )
+        let angleToTarget = atan2(target.y - center.y, target.x - center.x)
+
+        return PointerLandingPose(
+            center: center,
+            rotationDegrees: cursorRotationDegrees(pointingAlongRadians: angleToTarget),
+            side: side
+        )
+    }
+
+    private func cursorRotationDegrees(pointingAlongRadians radians: Double) -> Double {
+        // The Lucide cursor tip points roughly up-left at 0deg. Add this
+        // offset so a world-space angle of 0deg makes the tip face right,
+        // 180deg makes it face left, and vertical targets work too.
+        radians * (180.0 / .pi) + 137.0
+    }
+
+    private func interpolatedAngleDegrees(from start: Double, to end: Double, amount: Double) -> Double {
+        var delta = (end - start).truncatingRemainder(dividingBy: 360)
+        if delta > 180 {
+            delta -= 360
+        } else if delta < -180 {
+            delta += 360
+        }
+        return start + delta * amount
+    }
+
+    /// Animates the buddy along a restrained cubic bezier arc from its current
+    /// position to the destination. The arrow follows the travel direction
+    /// early, then eases into the landing pose before it reaches the target.
     private func animateBezierFlightArc(
         to destination: CGPoint,
+        landingRotationDegrees: Double? = nil,
+        followsTravelRotation: Bool = true,
         onComplete: @escaping () -> Void
     ) {
         navigationAnimationTimer?.invalidate()
@@ -776,22 +937,31 @@ struct BlueCursorView: View {
         let isNekoMode = companionManager.isNekoModeEnabled
         let flightDurationSeconds: Double = {
             if isNekoMode {
-                return min(max(distance / 500.0, 1.2), 2.4)
+                return min(max(distance / 420.0, 1.5), 2.8)
             }
-            return min(max(distance / 800.0, 0.6), 1.4)
+            return min(max(distance / 520.0, 1.05), 2.2)
         }()
-        let frameInterval: Double = 1.0 / 60.0
-        let totalFrames = Int(flightDurationSeconds / frameInterval)
-        var currentFrame = 0
+        let frameInterval: TimeInterval = 1.0 / 60.0
+        let startTime = CACurrentMediaTime()
 
-        // Control point for the quadratic bezier arc. Offset the midpoint
-        // upward (negative Y in SwiftUI) so the buddy flies in a parabolic arc.
-        let midPoint = CGPoint(
-            x: (startPosition.x + endPosition.x) / 2.0,
-            y: (startPosition.y + endPosition.y) / 2.0
+        let unitDirection = CGVector(
+            dx: distance > 0 ? deltaX / distance : 1,
+            dy: distance > 0 ? deltaY / distance : 0
         )
-        let arcHeight = min(distance * 0.2, 80.0)
-        let controlPoint = CGPoint(x: midPoint.x, y: midPoint.y - arcHeight)
+        let normal = CGVector(dx: -unitDirection.dy, dy: unitDirection.dx)
+        let arcDirection: CGFloat = startPosition.x <= endPosition.x ? -1 : 1
+        let controlDistance = min(max(distance * 0.38, 70), 220)
+        let arcHeight = min(max(distance * 0.08, 18), 58) * arcDirection
+        let controlPoint1 = CGPoint(
+            x: startPosition.x + unitDirection.dx * controlDistance + normal.dx * arcHeight,
+            y: startPosition.y + unitDirection.dy * controlDistance + normal.dy * arcHeight
+        )
+        let controlPoint2 = CGPoint(
+            x: endPosition.x - unitDirection.dx * controlDistance - normal.dx * arcHeight * 0.65,
+            y: endPosition.y - unitDirection.dy * controlDistance - normal.dy * arcHeight * 0.65
+        )
+        var previousAnimatedPoint = startPosition
+        var smoothedRotationDegrees = triangleRotationDegrees
 
         // Seed the fencing trail with the start position so the first rendered
         // frame has at least one segment to draw, and make the trail fully
@@ -800,61 +970,118 @@ struct BlueCursorView: View {
         flightTrailOpacity = 1.0
 
         navigationAnimationTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { _ in
-            currentFrame += 1
+            let elapsedSeconds = CACurrentMediaTime() - startTime
+            let linearProgress = min(1.0, elapsedSeconds / flightDurationSeconds)
 
-            if currentFrame > totalFrames {
+            if linearProgress >= 1.0 {
                 self.navigationAnimationTimer?.invalidate()
                 self.navigationAnimationTimer = nil
                 self.cursorPosition = endPosition
                 self.buddyFlightScale = 1.0
                 self.fadeOutFencingTrail()
-                onComplete()
+                self.settleAtDestination(
+                    destination: endPosition,
+                    landingRotationDegrees: landingRotationDegrees,
+                    onComplete: onComplete
+                )
                 return
             }
 
-            // Linear progress 0→1 over the flight duration
-            let linearProgress = Double(currentFrame) / Double(totalFrames)
+            // Smootherstep easeInOut. It lingers a touch at takeoff/landing,
+            // which makes the buddy read more like a floating object than
+            // a linearly animated pointer.
+            let t = linearProgress * linearProgress * linearProgress
+                * (linearProgress * (linearProgress * 6.0 - 15.0) + 10.0)
 
-            // Smoothstep easeInOut: 3t² - 2t³ (Hermite interpolation)
-            let t = linearProgress * linearProgress * (3.0 - 2.0 * linearProgress)
-
-            // Quadratic bezier: B(t) = (1-t)²·P0 + 2(1-t)t·P1 + t²·P2
+            // Cubic bezier flight path. Keep the curve soft and restrained:
+            // the pointer should feel relaxed, not like it is darting.
             let oneMinusT = 1.0 - t
-            let bezierX = oneMinusT * oneMinusT * startPosition.x
-                        + 2.0 * oneMinusT * t * controlPoint.x
-                        + t * t * endPosition.x
-            let bezierY = oneMinusT * oneMinusT * startPosition.y
-                        + 2.0 * oneMinusT * t * controlPoint.y
-                        + t * t * endPosition.y
+            let bezierX = oneMinusT * oneMinusT * oneMinusT * startPosition.x
+                + 3.0 * oneMinusT * oneMinusT * t * controlPoint1.x
+                + 3.0 * oneMinusT * t * t * controlPoint2.x
+                + t * t * t * endPosition.x
+            let bezierY = oneMinusT * oneMinusT * oneMinusT * startPosition.y
+                + 3.0 * oneMinusT * oneMinusT * t * controlPoint1.y
+                + 3.0 * oneMinusT * t * t * controlPoint2.y
+                + t * t * t * endPosition.y
 
-            self.cursorPosition = CGPoint(x: bezierX, y: bezierY)
+            let animatedPoint = CGPoint(x: bezierX, y: bezierY)
+            self.cursorPosition = animatedPoint
 
-            // Rotation: face the direction of travel by computing the tangent
-            // to the bezier curve. B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
-            let tangentX = 2.0 * oneMinusT * (controlPoint.x - startPosition.x)
-                         + 2.0 * t * (endPosition.x - controlPoint.x)
-            let tangentY = 2.0 * oneMinusT * (controlPoint.y - startPosition.y)
-                         + 2.0 * t * (endPosition.y - controlPoint.y)
-            // +135° offset because the Lucide cursor's tip points
-            // up-left at 0° rotation, while atan2 returns 0° for
-            // rightward movement.
-            self.triangleRotationDegrees = atan2(tangentY, tangentX) * (180.0 / .pi) + 135.0
+            let travelAngle = atan2(
+                animatedPoint.y - previousAnimatedPoint.y,
+                animatedPoint.x - previousAnimatedPoint.x
+            )
+            let travelRotation = self.cursorRotationDegrees(pointingAlongRadians: travelAngle)
+            let targetRotation: Double
+            if followsTravelRotation, let landingRotationDegrees {
+                let landingBlendStart = 0.66
+                let rawLandingBlend = min(
+                    1.0,
+                    max(0.0, (linearProgress - landingBlendStart) / (1.0 - landingBlendStart))
+                )
+                let easedLandingBlend = rawLandingBlend * rawLandingBlend * (3.0 - 2.0 * rawLandingBlend)
+                targetRotation = self.interpolatedAngleDegrees(
+                    from: travelRotation,
+                    to: landingRotationDegrees,
+                    amount: easedLandingBlend
+                )
+            } else if followsTravelRotation {
+                targetRotation = travelRotation
+            } else {
+                targetRotation = landingRotationDegrees ?? smoothedRotationDegrees
+            }
+            smoothedRotationDegrees = self.interpolatedAngleDegrees(
+                from: smoothedRotationDegrees,
+                to: targetRotation,
+                amount: followsTravelRotation ? 0.11 : 0.05
+            )
+            self.triangleRotationDegrees = smoothedRotationDegrees
+            previousAnimatedPoint = animatedPoint
 
             // Scale pulse: sin curve peaks at midpoint of the flight.
-            // Buddy grows to ~1.3x at the apex, then shrinks back to 1.0x on landing.
+            // Buddy grows slightly at the apex, then shrinks back on landing.
             let scalePulse = sin(linearProgress * .pi)
-            self.buddyFlightScale = 1.0 + scalePulse * 0.3
+            self.buddyFlightScale = 1.0 + scalePulse * 0.045
 
             // Append the new head to the fencing trail and drop the oldest
             // point if we're past the rolling-buffer cap. Keeping the trail
             // short guarantees the glow stays close to the buddy and fades
             // naturally behind it rather than persisting across the screen.
-            self.flightTrailPoints.append(CGPoint(x: bezierX, y: bezierY))
+            self.flightTrailPoints.append(animatedPoint)
             if self.flightTrailPoints.count > self.maximumFlightTrailPointCount {
                 self.flightTrailPoints.removeFirst(
                     self.flightTrailPoints.count - self.maximumFlightTrailPointCount
                 )
             }
+        }
+    }
+
+    private func settleAtDestination(
+        destination: CGPoint,
+        landingRotationDegrees: Double?,
+        onComplete: @escaping () -> Void
+    ) {
+        let settleOffset = CGPoint(
+            x: (cursorPosition.x - destination.x) * 0.08,
+            y: (cursorPosition.y - destination.y) * 0.08
+        )
+        cursorPosition = CGPoint(
+            x: destination.x + settleOffset.x,
+            y: destination.y + settleOffset.y
+        )
+
+        withAnimation(.easeInOut(duration: 0.22)) {
+            cursorPosition = destination
+            buddyFlightScale = 1.0
+            if let landingRotationDegrees {
+                triangleRotationDegrees = landingRotationDegrees
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.24) {
+            guard self.buddyNavigationMode == .navigatingToTarget else { return }
+            onComplete()
         }
     }
 
@@ -878,14 +1105,19 @@ struct BlueCursorView: View {
     private func startPointingAtElement() {
         buddyNavigationMode = .pointingAtTarget
 
-        // Rotate back to default pointer angle now that we've arrived
-        triangleRotationDegrees = 0.0
+        // Hold the landing pose so the cursor tip points into the resolved
+        // target from whichever side had the most room.
+        withAnimation(.easeInOut(duration: 0.28)) {
+            triangleRotationDegrees = navigationPointingRotationDegrees
+        }
+        isPointerBreathing = true
 
-        // Reset navigation bubble state — start small for the scale-bounce entrance
+        // Reset navigation bubble state. Keep the entrance understated so it
+        // doesn't steal attention from the target.
         navigationBubbleText = ""
         navigationBubbleOpacity = 1.0
         navigationBubbleSize = .zero
-        navigationBubbleScale = 0.5
+        navigationBubbleScale = 0.96
 
         // Use custom bubble text from the companion manager (e.g. onboarding demo)
         // if available, otherwise fall back to a random pointer phrase
@@ -922,7 +1154,7 @@ struct BlueCursorView: View {
         let charIndex = phrase.index(phrase.startIndex, offsetBy: characterIndex)
         navigationBubbleText.append(phrase[charIndex])
 
-        // On the first character, trigger the scale-bounce entrance
+        // On the first character, let the bubble ease into place.
         if characterIndex == 0 {
             navigationBubbleScale = 1.0
         }
@@ -942,14 +1174,65 @@ struct BlueCursorView: View {
         let mouseLocation = NSEvent.mouseLocation
         let cursorInSwiftUI = convertScreenPointToSwiftUICoordinates(mouseLocation)
         let cursorWithTrackingOffset = CGPoint(x: cursorInSwiftUI.x + 35, y: cursorInSwiftUI.y + 25)
+        let returnDistance = hypot(
+            cursorWithTrackingOffset.x - cursorPosition.x,
+            cursorWithTrackingOffset.y - cursorPosition.y
+        )
 
         cursorPositionWhenNavigationStarted = cursorInSwiftUI
 
         buddyNavigationMode = .navigatingToTarget
         isReturningToCursor = true
+        isPointerBreathing = false
 
-        animateBezierFlightArc(to: cursorWithTrackingOffset) {
+        if returnDistance < 72 {
+            navigationAnimationTimer?.invalidate()
+            navigationAnimationTimer = nil
+            fadeOutFencingTrail()
+            dockBackToCursor(destination: cursorWithTrackingOffset)
+            return
+        }
+
+        animateBezierFlightArc(
+            to: cursorWithTrackingOffset,
+            landingRotationDegrees: 0,
+            followsTravelRotation: false
+        ) {
             self.finishNavigationAndResumeFollowing()
+        }
+    }
+
+    private func dockBackToCursor(destination: CGPoint) {
+        let startPosition = cursorPosition
+        let startRotation = triangleRotationDegrees
+        let durationSeconds: TimeInterval = 0.34
+        let frameInterval: TimeInterval = 1.0 / 60.0
+        let startTime = CACurrentMediaTime()
+
+        navigationAnimationTimer = Timer.scheduledTimer(withTimeInterval: frameInterval, repeats: true) { _ in
+            let elapsedSeconds = CACurrentMediaTime() - startTime
+            let linearProgress = min(1.0, elapsedSeconds / durationSeconds)
+            let t = linearProgress * linearProgress * (3.0 - 2.0 * linearProgress)
+
+            self.cursorPosition = CGPoint(
+                x: startPosition.x + (destination.x - startPosition.x) * t,
+                y: startPosition.y + (destination.y - startPosition.y) * t
+            )
+            self.triangleRotationDegrees = self.interpolatedAngleDegrees(
+                from: startRotation,
+                to: 0,
+                amount: t
+            )
+            self.buddyFlightScale = 1.0
+
+            if linearProgress >= 1.0 {
+                self.navigationAnimationTimer?.invalidate()
+                self.navigationAnimationTimer = nil
+                self.cursorPosition = destination
+                self.triangleRotationDegrees = 0
+                guard self.buddyNavigationMode == .navigatingToTarget else { return }
+                self.finishNavigationAndResumeFollowing()
+            }
         }
     }
 
@@ -961,6 +1244,7 @@ struct BlueCursorView: View {
         navigationBubbleOpacity = 0.0
         navigationBubbleScale = 1.0
         buddyFlightScale = 1.0
+        isPointerBreathing = false
         fadeOutFencingTrail()
         finishNavigationAndResumeFollowing()
     }
@@ -971,6 +1255,7 @@ struct BlueCursorView: View {
         navigationAnimationTimer = nil
         buddyNavigationMode = .followingCursor
         isReturningToCursor = false
+        isPointerBreathing = false
         triangleRotationDegrees = 0.0
         buddyFlightScale = 1.0
         navigationBubbleText = ""

@@ -6,6 +6,9 @@ struct TextCommandPanelView: View {
     @State private var commandText: String = ""
 
     var body: some View {
+        let activityText = companionManager.textCommandActivityText ?? ""
+        let hasActivityText = !activityText.isEmpty
+
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 9) {
                 Image(systemName: "command")
@@ -27,17 +30,21 @@ struct TextCommandPanelView: View {
                         companionManager.dismissTextCommandPanel()
                     }
             }
+            .frame(height: 18)
 
-            if let activityText = companionManager.textCommandActivityText,
-               !activityText.isEmpty {
+            ZStack(alignment: .leading) {
                 TextCommandActivityTicker(
                     text: activityText,
                     isActive: companionManager.voiceState == .processing
                 )
+                .opacity(hasActivityText ? 1 : 0)
             }
+            .frame(height: 14)
+            .clipped()
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
+        .frame(width: 340, height: 64, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(DS.Colors.background.opacity(0.96))
@@ -47,7 +54,7 @@ struct TextCommandPanelView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .stroke(DS.Colors.borderSubtle.opacity(0.72), lineWidth: 0.8)
         )
-        .animation(.snappy(duration: 0.22), value: companionManager.textCommandActivityText)
+        .animation(.easeInOut(duration: 0.16), value: companionManager.textCommandActivityText)
         .onAppear {
             commandText = ""
             DispatchQueue.main.async {
@@ -81,12 +88,12 @@ private struct TextCommandActivityTicker: View {
                     .id(text)
                     .font(.system(size: 11, weight: .regular))
                     .foregroundColor(DS.Colors.textSecondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
                     .truncationMode(.tail)
                     .transition(
                         .asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .move(edge: .top).combined(with: .opacity)
+                            insertion: .opacity,
+                            removal: .opacity
                         )
                     )
             }
@@ -95,7 +102,6 @@ private struct TextCommandActivityTicker: View {
         }
         .padding(.leading, 25)
         .padding(.trailing, 2)
-        .transition(.opacity.combined(with: .move(edge: .top)))
         .accessibilityElement(children: .combine)
     }
 }

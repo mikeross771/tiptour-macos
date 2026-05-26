@@ -12,15 +12,15 @@ final class TextCommandPanelManager {
     private var panel: NSPanel?
     private var mouseTrackingTimer: Timer?
     private var currentPanelOrigin: CGPoint?
-    private var lastMeasuredPanelSize = NSSize(width: 340, height: 64)
 
-    private let panelMinimumWidth: CGFloat = 340
-    private let panelMinimumHeight: CGFloat = 42
+    private let panelSize = NSSize(width: 340, height: 64)
     private let screenEdgeInset: CGFloat = 12
     private let cursorClearance: CGFloat = 44
     private let horizontalOffsetFromCursor: CGFloat = 56
     private let verticalOffsetFromCursor: CGFloat = 32
-    private let smoothingFactor: CGFloat = 0.34
+    private let trackingInterval: TimeInterval = 1.0 / 60.0
+    private let smoothingFactor: CGFloat = 0.24
+    private let fadeDuration: TimeInterval = 0.12
 
     init(companionManager: CompanionManager) {
         self.companionManager = companionManager
@@ -33,9 +33,14 @@ final class TextCommandPanelManager {
             createPanel(companionManager: companionManager)
         }
 
-        positionPanel(animated: false)
+        let mouseLocation = NSEvent.mouseLocation
+        currentPanelOrigin = nil
+
+        panel?.alphaValue = 0
+        positionPanel(at: mouseLocation, animated: false)
         panel?.makeKeyAndOrderFront(nil)
         panel?.orderFrontRegardless()
+        fadePanel(to: 1)
         startMouseTracking()
     }
 
@@ -46,16 +51,16 @@ final class TextCommandPanelManager {
 
     private func createPanel(companionManager: CompanionManager) {
         let textCommandView = TextCommandPanelView(companionManager: companionManager)
-            .frame(width: 340)
+            .frame(width: panelSize.width, height: panelSize.height)
 
         let hostingView = NSHostingView(rootView: textCommandView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 64)
+        hostingView.frame = NSRect(origin: .zero, size: panelSize)
         hostingView.wantsLayer = true
         hostingView.layer?.backgroundColor = .clear
-        hostingView.sizingOptions = [.intrinsicContentSize]
+        hostingView.sizingOptions = []
 
         let commandPanel = TextCommandKeyablePanel(
-            contentRect: NSRect(x: 0, y: 0, width: 340, height: 64),
+            contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -79,9 +84,9 @@ final class TextCommandPanelManager {
 
     private func startMouseTracking() {
         stopMouseTracking()
-        let trackingTimer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        let trackingTimer = Timer(timeInterval: trackingInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.positionPanel(animated: true)
+                self?.handleMouseTrackingTick()
             }
         }
         mouseTrackingTimer = trackingTimer
@@ -94,15 +99,18 @@ final class TextCommandPanelManager {
         currentPanelOrigin = nil
     }
 
-    private func positionPanel(animated: Bool) {
+    private func handleMouseTrackingTick() {
+        guard let panel, panel.isVisible else { return }
+        positionPanel(at: NSEvent.mouseLocation, animated: true)
+    }
+
+    private func positionPanel(at mouseLocation: CGPoint, animated: Bool) {
         guard let panel else { return }
-        let mouseLocation = NSEvent.mouseLocation
         let targetScreen = NSScreen.screens.first { screen in
             screen.frame.contains(mouseLocation)
         } ?? NSScreen.main
         guard let screenFrame = targetScreen?.frame else { return }
 
-        let panelSize = measuredPanelSize(for: panel)
         let targetOrigin = targetPanelOrigin(
             mouseLocation: mouseLocation,
             panelSize: panelSize,
@@ -115,20 +123,16 @@ final class TextCommandPanelManager {
         )
         currentPanelOrigin = nextOrigin
 
+        let currentFrame = panel.frame
+        let positionChanged = abs(currentFrame.minX - nextOrigin.x) > 0.35
+            || abs(currentFrame.minY - nextOrigin.y) > 0.35
+        guard positionChanged || currentFrame.size != panelSize else { return }
+
         panel.setFrame(
             NSRect(x: nextOrigin.x, y: nextOrigin.y, width: panelSize.width, height: panelSize.height),
             display: true,
             animate: false
         )
-    }
-
-    private func measuredPanelSize(for panel: NSPanel) -> NSSize {
-        let fittingSize = panel.contentView?.fittingSize ?? lastMeasuredPanelSize
-        lastMeasuredPanelSize = NSSize(
-            width: max(fittingSize.width, panelMinimumWidth),
-            height: max(fittingSize.height, panelMinimumHeight)
-        )
-        return lastMeasuredPanelSize
     }
 
     private func targetPanelOrigin(
@@ -196,5 +200,14 @@ final class TextCommandPanelManager {
             x: currentOrigin.x + deltaX * smoothingFactor,
             y: currentOrigin.y + deltaY * smoothingFactor
         )
+    }
+
+    private func fadePanel(to alphaValue: CGFloat) {
+        guard let panel else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = fadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().alphaValue = alphaValue
+        }
     }
 }
