@@ -13,6 +13,7 @@ struct PointerPromptRoute {
         case localAction(PointerActionRequest)
         case claudeOneStep
         case hermesLongTask
+        case nanoClawLongTask
     }
 
     let destination: Destination
@@ -20,15 +21,30 @@ struct PointerPromptRoute {
 }
 
 enum PointerPromptRouter {
+    enum LongTaskAgent {
+        case hermes
+        case nanoClaw
+    }
+
     static func route(
         prompt: String,
         targetAppName: String?,
-        isHermesAutoEnabled: Bool
+        longTaskAgent: LongTaskAgent?
     ) -> PointerPromptRoute {
-        if isHermesAutoEnabled, looksLikeLongRunningTask(prompt) {
+        if let longTaskAgent, looksLikeLongRunningTask(prompt) {
+            let destination: PointerPromptRoute.Destination
+            let reason: String
+            switch longTaskAgent {
+            case .hermes:
+                destination = .hermesLongTask
+                reason = "long_running_task_hermes"
+            case .nanoClaw:
+                destination = .nanoClawLongTask
+                reason = "long_running_task_nanoclaw"
+            }
             return PointerPromptRoute(
-                destination: .hermesLongTask,
-                reason: "long_running_task"
+                destination: destination,
+                reason: reason
             )
         }
 

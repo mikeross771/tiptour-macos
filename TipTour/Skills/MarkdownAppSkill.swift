@@ -122,6 +122,7 @@ struct MarkdownAppSkill {
             appNames: appNames,
             bundleIdentifiers: bundleIdentifiers,
             plannerInstructionCount: runtimeHints.plannerInstructions.count,
+            plannerInstructions: runtimeHints.plannerInstructions,
             isActive: isActive
         )
     }
@@ -145,6 +146,7 @@ struct MarkdownAppSkillInfo: Encodable {
     let appNames: [String]
     let bundleIdentifiers: [String]
     let plannerInstructionCount: Int
+    let plannerInstructions: [String]
     let isActive: Bool
 }
 

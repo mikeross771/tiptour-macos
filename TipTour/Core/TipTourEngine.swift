@@ -17,6 +17,28 @@ struct TipTourEngineSubmissionResult: Encodable {
     let acceptedSteps: Int
     let ignoredSteps: Int
     let activeApp: String?
+    let workflowOutcome: TipTourEngineWorkflowOutcome?
+    let targetCountAfterAction: Int?
+
+    init(
+        ok: Bool,
+        reason: String?,
+        message: String?,
+        acceptedSteps: Int,
+        ignoredSteps: Int,
+        activeApp: String?,
+        workflowOutcome: TipTourEngineWorkflowOutcome? = nil,
+        targetCountAfterAction: Int? = nil
+    ) {
+        self.ok = ok
+        self.reason = reason
+        self.message = message
+        self.acceptedSteps = acceptedSteps
+        self.ignoredSteps = ignoredSteps
+        self.activeApp = activeApp
+        self.workflowOutcome = workflowOutcome
+        self.targetCountAfterAction = targetCountAfterAction
+    }
 }
 
 struct TipTourEngineObservation: Encodable {
@@ -30,6 +52,7 @@ struct TipTourEngineObservation: Encodable {
     let isCuaActionDriverEnabled: Bool
     let isHermesOrchestratorEnabled: Bool
     let detectionElementCount: Int
+    let externalHarnessVisualContext: String
 }
 
 struct TipTourEngineSkillList: Encodable {
@@ -54,6 +77,28 @@ struct TipTourEngineTargetList: Encodable {
     let activeBundleIdentifier: String?
     let targetCount: Int
     let targets: [LocalPerceptionTargetCache.SnapshotTarget]
+}
+
+struct TipTourEngineScreenshotList: Encodable {
+    let ok: Bool
+    let reason: String?
+    let message: String?
+    let activeAppName: String?
+    let activeBundleIdentifier: String?
+    let screenshotCount: Int
+    let screenshots: [TipTourEngineScreenshot]
+}
+
+struct TipTourEngineScreenshot: Encodable {
+    let label: String
+    let isCursorScreen: Bool
+    let displayWidthInPoints: Int
+    let displayHeightInPoints: Int
+    let screenshotWidthInPixels: Int
+    let screenshotHeightInPixels: Int
+    let capturedAt: String
+    let mediaType: String
+    let dataURL: String
 }
 
 struct TipTourEnginePlannedActionStep: Encodable {
@@ -162,7 +207,8 @@ final class TipTourEngine {
             isAccurateGroundingEnabled: isAccurateGroundingEnabledProvider(),
             isCuaActionDriverEnabled: isCuaActionDriverEnabledProvider(),
             isHermesOrchestratorEnabled: isHermesOrchestratorEnabledProvider(),
-            detectionElementCount: detectionElementCountProvider()
+            detectionElementCount: detectionElementCountProvider(),
+            externalHarnessVisualContext: "External harnesses can call /v1/screenshots for raw JPEG screenshots when the Screenshots toggle is enabled, and /v1/targets for fresh local YOLO/OCR targets. Call /v1/targets after UI-changing actions; call /v1/screenshots when raw visual layout matters."
         )
     }
 
@@ -212,6 +258,58 @@ final class TipTourEngine {
         )
     }
 
+    func screenshots() async -> TipTourEngineScreenshotList {
+        let activeApp = NSWorkspace.shared.frontmostApplication
+        guard isScreenshotStreamingEnabledProvider() else {
+            return TipTourEngineScreenshotList(
+                ok: false,
+                reason: "screenshots_disabled",
+                message: "TipTour Screenshots is off, so the harness will not expose raw screen images.",
+                activeAppName: activeApp?.localizedName,
+                activeBundleIdentifier: activeApp?.bundleIdentifier,
+                screenshotCount: 0,
+                screenshots: []
+            )
+        }
+
+        do {
+            let captures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
+            let screenshots = captures.prefix(2).map { capture in
+                TipTourEngineScreenshot(
+                    label: capture.label,
+                    isCursorScreen: capture.isCursorScreen,
+                    displayWidthInPoints: capture.displayWidthInPoints,
+                    displayHeightInPoints: capture.displayHeightInPoints,
+                    screenshotWidthInPixels: capture.screenshotWidthInPixels,
+                    screenshotHeightInPixels: capture.screenshotHeightInPixels,
+                    capturedAt: Self.iso8601Formatter.string(from: capture.captureTimestamp),
+                    mediaType: "image/jpeg",
+                    dataURL: "data:image/jpeg;base64,\(capture.imageData.base64EncodedString())"
+                )
+            }
+
+            return TipTourEngineScreenshotList(
+                ok: true,
+                reason: nil,
+                message: "Captured fresh TipTour screenshots.",
+                activeAppName: activeApp?.localizedName,
+                activeBundleIdentifier: activeApp?.bundleIdentifier,
+                screenshotCount: screenshots.count,
+                screenshots: screenshots
+            )
+        } catch {
+            return TipTourEngineScreenshotList(
+                ok: false,
+                reason: "screenshot_capture_failed",
+                message: error.localizedDescription,
+                activeAppName: activeApp?.localizedName,
+                activeBundleIdentifier: activeApp?.bundleIdentifier,
+                screenshotCount: 0,
+                screenshots: []
+            )
+        }
+    }
+
     func planNextAction(
         goal: String,
         app: String?,
@@ -238,6 +336,14 @@ final class TipTourEngine {
     func runPointerAction(_ pointerActionRequest: PointerActionRequest) async -> TipTourEnginePlanNextActionResult {
         activityReporter("Hermes locating \(pointerActionRequest.targetLabel ?? pointerActionRequest.goal)")
         await activateRequestedApplicationForPerceptionIfNeeded(pointerActionRequest.app)
+
+        if let targetlessStep = targetlessPlanNextActionStep(for: pointerActionRequest) {
+            return await runTargetlessPlanNextAction(
+                step: targetlessStep,
+                pointerActionRequest: pointerActionRequest
+            )
+        }
+
         await refreshLocalPerception("harness plan-next-action")
 
         let targets = LocalPerceptionTargetCache.shared.currentTargets()
@@ -389,6 +495,18 @@ final class TipTourEngine {
             )
         }
 
+        guard normalizedSteps.count == 1 else {
+            print("[Engine] rejecting multi-step external workflow plan \"\(plan.goal)\" - received \(normalizedSteps.count) step(s)")
+            return TipTourEngineSubmissionResult(
+                ok: false,
+                reason: "single_action_required",
+                message: "TipTour external harness mode accepts exactly one action per /v1/workflow-plan request. Send only the next action, wait for the response to complete, then observe or request targets before continuing.",
+                acceptedSteps: 0,
+                ignoredSteps: normalizedSteps.count,
+                activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+            )
+        }
+
         if let invalidReason = invalidSingleActionReason(for: firstStep) {
             return TipTourEngineSubmissionResult(
                 ok: false,
@@ -405,10 +523,6 @@ final class TipTourEngine {
             app: plan.app,
             steps: [firstStep]
         )
-        let ignoredSteps = max(0, normalizedSteps.count - 1)
-        if ignoredSteps > 0 {
-            print("[Engine] single-action mode: ignoring \(ignoredSteps) extra step(s)")
-        }
 
         let actionLabel = firstStep.label ?? firstStep.value ?? "<unlabeled>"
         print("[Engine] accepted workflow plan \"\(singleActionPlan.goal)\" -> \(actionLabel)")
@@ -420,9 +534,69 @@ final class TipTourEngine {
             reason: nil,
             message: "Accepted one TipTour action.",
             acceptedSteps: 1,
-            ignoredSteps: ignoredSteps,
+            ignoredSteps: 0,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
         )
+    }
+
+    func submitSingleActionWorkflowPlanAndWait(_ plan: WorkflowPlan) async -> TipTourEngineSubmissionResult {
+        let submission = submitSingleActionWorkflowPlan(plan)
+        guard submission.ok else {
+            return submission
+        }
+
+        let workflowOutcome = await waitForWorkflowSettlement()
+        if shouldRefreshPerceptionAfterWorkflowPlan(plan) {
+            await refreshLocalPerception("harness workflow-plan post-action")
+        }
+        let completed = workflowOutcome.status == "completed"
+
+        return TipTourEngineSubmissionResult(
+            ok: completed,
+            reason: completed ? nil : workflowOutcome.reason,
+            message: completed ? "Executed one TipTour action." : workflowOutcome.message,
+            acceptedSteps: submission.acceptedSteps,
+            ignoredSteps: submission.ignoredSteps,
+            activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
+            workflowOutcome: workflowOutcome,
+            targetCountAfterAction: LocalPerceptionTargetCache.shared.currentTargets().count
+        )
+    }
+
+    private func shouldRefreshPerceptionAfterWorkflowPlan(_ plan: WorkflowPlan) -> Bool {
+        guard let step = plan.steps.first else { return false }
+        if isTargetlessKeyboardLikeStep(step) {
+            return false
+        }
+
+        switch step.type {
+        case .observe:
+            return false
+        case .click, .rightClick, .doubleClick, .openApp, .openURL, .setValue, .scroll:
+            return true
+        case .keyboardShortcut, .pressKey, .type, .waitForState:
+            return true
+        }
+    }
+
+    private func isTargetlessKeyboardLikeStep(_ step: WorkflowStep) -> Bool {
+        switch step.type {
+        case .keyboardShortcut, .pressKey, .type:
+            break
+        default:
+            return false
+        }
+
+        if didRequestExplicitTarget(targetID: step.targetID, targetMark: step.targetMark) {
+            return false
+        }
+        if step.targetContext == .visibleElement {
+            return false
+        }
+        if step.box2DNormalized?.isEmpty == false || step.hintX != nil || step.hintY != nil {
+            return false
+        }
+        return true
     }
 
     private func didRequestExplicitTarget(targetID: String?, targetMark: Int?) -> Bool {
@@ -431,6 +605,146 @@ final class TipTourEngine {
             return true
         }
         return targetMark != nil
+    }
+
+    private func targetlessPlanNextActionStep(for request: PointerActionRequest) -> WorkflowStep? {
+        switch request.actionType {
+        case .pressKey:
+            let key = nonEmpty(request.targetLabel) ?? inferredKeyToPress(from: request.goal, appName: request.app)
+            return key.map {
+                targetlessWorkflowStep(type: .pressKey, label: $0, value: nil, goal: request.goal)
+            }
+        case .keyboardShortcut:
+            let shortcut = nonEmpty(request.targetLabel) ?? inferredKeyboardShortcut(from: request.goal)
+            return shortcut.map {
+                targetlessWorkflowStep(type: .keyboardShortcut, label: $0, value: nil, goal: request.goal)
+            }
+        case .type:
+            let text = nonEmpty(request.targetLabel) ?? inferredTextToType(from: request.goal)
+            return text.map {
+                targetlessWorkflowStep(type: .type, label: nil, value: $0, goal: request.goal)
+            }
+        case .openApp:
+            let applicationName = nonEmpty(request.targetLabel) ?? nonEmpty(request.app) ?? nonEmpty(request.goal)
+            return applicationName.map {
+                targetlessWorkflowStep(type: .openApp, label: $0, value: nil, goal: request.goal)
+            }
+        case .openURL:
+            let urlString = nonEmpty(request.targetLabel) ?? nonEmpty(request.goal)
+            return urlString.map {
+                targetlessWorkflowStep(type: .openURL, label: $0, value: nil, goal: request.goal)
+            }
+        default:
+            guard shouldForceReturnForBlenderConfirmation(request) else { return nil }
+            return targetlessWorkflowStep(type: .pressKey, label: "Return", value: nil, goal: request.goal)
+        }
+    }
+
+    private func runTargetlessPlanNextAction(
+        step: WorkflowStep,
+        pointerActionRequest: PointerActionRequest
+    ) async -> TipTourEnginePlanNextActionResult {
+        let plannedStep = plannedTargetlessActionStep(step)
+        guard pointerActionRequest.execute else {
+            return TipTourEnginePlanNextActionResult(
+                ok: true,
+                reason: nil,
+                message: "Planned one targetless TipTour action.",
+                activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
+                plannedStep: plannedStep,
+                submission: nil,
+                workflowOutcome: nil,
+                validation: nil,
+                attempts: [],
+                repaired: false,
+                targets: LocalPerceptionTargetCache.shared.currentTargets()
+            )
+        }
+
+        let submission = await submitSingleActionWorkflowPlanAndWait(
+            WorkflowPlan(
+                goal: pointerActionRequest.goal,
+                app: pointerActionRequest.app,
+                steps: [step]
+            )
+        )
+
+        return TipTourEnginePlanNextActionResult(
+            ok: submission.ok,
+            reason: submission.reason,
+            message: submission.message,
+            activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
+            plannedStep: plannedStep,
+            submission: submission,
+            workflowOutcome: submission.workflowOutcome,
+            validation: nil,
+            attempts: [],
+            repaired: false,
+            targets: LocalPerceptionTargetCache.shared.currentTargets()
+        )
+    }
+
+    private func targetlessWorkflowStep(
+        type: WorkflowStep.StepType,
+        label: String?,
+        value: String?,
+        goal: String
+    ) -> WorkflowStep {
+        WorkflowStep(
+            id: "harness_targetless_step",
+            type: type,
+            label: label,
+            targetID: nil,
+            targetMark: nil,
+            value: value,
+            direction: nil,
+            amount: nil,
+            by: nil,
+            targetContext: nil,
+            hint: goal,
+            hintX: nil,
+            hintY: nil,
+            box2DNormalized: nil,
+            screenNumber: nil
+        )
+    }
+
+    private func plannedTargetlessActionStep(_ step: WorkflowStep) -> TipTourEnginePlannedActionStep {
+        let label = step.label ?? step.value ?? step.direction ?? step.type.rawValue
+        return TipTourEnginePlannedActionStep(
+            type: step.type.rawValue,
+            label: label,
+            targetID: "targetless",
+            targetMark: 0,
+            hint: "Run targetless \(step.type.rawValue) action \"\(label)\"",
+            box2D: [],
+            matchedSource: "semantic",
+            matchedConfidence: 1.0
+        )
+    }
+
+    private func shouldForceReturnForBlenderConfirmation(_ request: PointerActionRequest) -> Bool {
+        guard isBlenderAppContext(request.app) else { return false }
+        let normalizedText = normalizedCommandText("\(request.goal) \(request.targetLabel ?? "")")
+        return normalizedText.contains("confirmdelete")
+            || normalizedText.contains("deleteconfirmation")
+            || (normalizedText.contains("confirm") && normalizedText.contains("delete"))
+            || (normalizedText.contains("apply") && normalizedText.contains("delete"))
+    }
+
+    private func isBlenderAppContext(_ appName: String?) -> Bool {
+        if skillForAppHint(appName)?.name == "blender" {
+            return true
+        }
+        if normalizedCommandText(appName ?? "").contains("blender") {
+            return true
+        }
+        return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "org.blenderfoundation.blender"
+    }
+
+    private func nonEmpty(_ text: String?) -> String? {
+        let trimmedText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedText.isEmpty ? nil : trimmedText
     }
 
     private func explicitTarget(

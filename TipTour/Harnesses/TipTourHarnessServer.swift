@@ -17,6 +17,10 @@ final class TipTourHarnessServer {
     private let port: NWEndpoint.Port
     private let activityReporter: @MainActor (String) -> Void
     private var listener: NWListener?
+    private var restartAttempts = 0
+    private let maximumRestartAttempts = 5
+    private var intentionallyStopped = false
+    private var listenerReady = false
 
     init(
         tipTourEngine: TipTourEngine,
@@ -41,14 +45,20 @@ final class TipTourHarnessServer {
             }
 
             let listener = try NWListener(using: parameters)
-            configureAndStart(listener)
+            intentionallyStopped = false
+            listenerReady = false
             self.listener = listener
+            configureAndStart(listener)
+            scheduleStartupReadinessCheck(for: listener)
         } catch {
             print("[Harness] failed to start local harness: \(error)")
+            scheduleRestart()
         }
     }
 
     func stop() {
+        intentionallyStopped = true
+        listenerReady = false
         listener?.cancel()
         listener = nil
     }
@@ -59,17 +69,76 @@ final class TipTourHarnessServer {
                 self?.handle(connection: connection)
             }
         }
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                print("[Harness] TipTour local harness listening on http://127.0.0.1:\(self.port)")
-            case .failed(let error):
-                print("[Harness] local harness failed: \(error)")
-            default:
-                break
+        listener.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.listenerReady = true
+                    self.restartAttempts = 0
+                    print("[Harness] TipTour local harness listening on http://127.0.0.1:\(self.port)")
+                case .waiting(let error):
+                    self.listenerReady = false
+                    print("[Harness] local harness waiting: \(error)")
+                case .failed(let error):
+                    self.listenerReady = false
+                    print("[Harness] local harness failed: \(error)")
+                    if self.listener === listener {
+                        self.listener?.cancel()
+                        self.listener = nil
+                    }
+                    if !self.intentionallyStopped {
+                        self.scheduleRestart()
+                    }
+                case .cancelled:
+                    self.listenerReady = false
+                    guard !self.intentionallyStopped else { return }
+                    print("[Harness] local harness cancelled unexpectedly")
+                    if self.listener === listener {
+                        self.listener = nil
+                    }
+                    self.scheduleRestart()
+                default:
+                    break
+                }
             }
         }
         listener.start(queue: .main)
+    }
+
+    private func scheduleStartupReadinessCheck(for listener: NWListener) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            Task { @MainActor in
+                guard let self,
+                      self.listener === listener,
+                      !self.listenerReady,
+                      !self.intentionallyStopped else {
+                    return
+                }
+
+                print("[Harness] local harness did not become ready; restarting")
+                self.listener?.cancel()
+                self.listener = nil
+                self.scheduleRestart()
+            }
+        }
+    }
+
+    private func scheduleRestart() {
+        guard restartAttempts < maximumRestartAttempts else {
+            print("[Harness] local harness restart limit reached")
+            return
+        }
+
+        restartAttempts += 1
+        let attempt = restartAttempts
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.listener == nil else { return }
+                print("[Harness] retrying local harness start (attempt \(attempt))")
+                self.start()
+            }
+        }
     }
 
     private func handle(connection: NWConnection) {
@@ -137,6 +206,7 @@ final class TipTourHarnessServer {
                 "ok": true,
                 "tools": [
                     "tiptour.observe",
+                    "tiptour.screenshots",
                     "tiptour.skills",
                     "tiptour.active_skill",
                     "tiptour.targets",
@@ -150,6 +220,10 @@ final class TipTourHarnessServer {
         case ("GET", "/v1/observe"):
             activityReporter("Hermes observing the desktop")
             response = encodableResponse(tipTourEngine.observe())
+        case ("GET", "/v1/screenshots"), ("GET", "/v1/screenshot"):
+            activityReporter("Hermes reading screenshots")
+            let screenshots = await tipTourEngine.screenshots()
+            response = encodableResponse(screenshots)
         case ("GET", "/v1/skills"):
             activityReporter("Hermes reading app skills")
             response = encodableResponse(tipTourEngine.skills())
@@ -166,7 +240,8 @@ final class TipTourHarnessServer {
             activityReporter("Hermes planning the next action")
             response = await handlePlanNextActionRequest(body: request.body)
         case ("POST", "/v1/workflow-plan"), ("POST", "/v1/submit_workflow_plan"):
-            response = handleWorkflowPlanRequest(body: request.body)
+            activityReporter("Hermes submitting one action")
+            response = await handleWorkflowPlanRequest(body: request.body)
         default:
             response = jsonResponse(
                 ["ok": false, "reason": "not_found"],
@@ -206,11 +281,11 @@ final class TipTourHarnessServer {
         }
     }
 
-    private func handleWorkflowPlanRequest(body: Data) -> HarnessHTTPResponse {
+    private func handleWorkflowPlanRequest(body: Data) async -> HarnessHTTPResponse {
         do {
             let request = try JSONDecoder().decode(HarnessWorkflowPlanRequest.self, from: body)
             let plan = request.toWorkflowPlan()
-            let result = tipTourEngine.submitSingleActionWorkflowPlan(plan)
+            let result = await tipTourEngine.submitSingleActionWorkflowPlanAndWait(plan)
             return encodableResponse(result)
         } catch {
             return jsonResponse(

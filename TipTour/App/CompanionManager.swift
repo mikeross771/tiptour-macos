@@ -57,6 +57,10 @@ final class CompanionManager: ObservableObject {
     @Published var isHermesOrchestratorEnabled: Bool = TipTourDefaults.isHermesOrchestratorEnabled
     @Published var hermesAPIBaseURL: String = TipTourDefaults.hermesAPIBaseURL
     @Published private(set) var hermesConnectionStatus: HermesConnectionStatus = .idle
+    @Published var isNanoClawOrchestratorEnabled: Bool = TipTourDefaults.isNanoClawOrchestratorEnabled
+    @Published var nanoClawAPIBaseURL: String = TipTourDefaults.nanoClawAPIBaseURL
+    @Published var nanoClawCLIExecutablePath: String = TipTourDefaults.nanoClawCLIExecutablePath
+    @Published private(set) var nanoClawConnectionStatus: NanoClawConnectionStatus = .idle
 
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
@@ -98,8 +102,11 @@ final class CompanionManager: ObservableObject {
     private var voiceModelSpeakingCancellable: AnyCancellable?
     private let claudeActionPlannerClient = ClaudeActionPlannerClient()
     private let hermesAgentClient = HermesAgentClient()
+    private let nanoClawAgentClient = NanoClawAgentClient()
     private var hermesSessionID: String?
+    private var nanoClawSessionID: String?
     private var isTextCommandHermesWorkflowActive = false
+    private var isTextCommandNanoClawWorkflowActive = false
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     private var detectionOverlayTask: Task<Void, Never>?
     private var postActionDetectionRefreshTask: Task<Void, Never>?
@@ -158,7 +165,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func reportHermesHarnessActivity(_ activityText: String) {
-        guard isTextCommandHermesWorkflowActive else { return }
+        guard isTextCommandHermesWorkflowActive || isTextCommandNanoClawWorkflowActive else { return }
         textCommandActivityText = activityText
         lastTranscript = activityText
     }
@@ -720,6 +727,10 @@ final class CompanionManager: ObservableObject {
     func setHermesOrchestratorEnabled(_ enabled: Bool) {
         isHermesOrchestratorEnabled = enabled
         TipTourDefaults.isHermesOrchestratorEnabled = enabled
+        if enabled {
+            isNanoClawOrchestratorEnabled = false
+            TipTourDefaults.isNanoClawOrchestratorEnabled = false
+        }
         guard enabled else { return }
         Task {
             await detectHermesConnection()
@@ -774,6 +785,100 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    func setNanoClawOrchestratorEnabled(_ enabled: Bool) {
+        isNanoClawOrchestratorEnabled = enabled
+        TipTourDefaults.isNanoClawOrchestratorEnabled = enabled
+        if enabled {
+            isHermesOrchestratorEnabled = false
+            TipTourDefaults.isHermesOrchestratorEnabled = false
+        }
+        guard enabled else { return }
+        Task {
+            await detectNanoClawConnection()
+        }
+    }
+
+    func setNanoClawAPIBaseURL(_ baseURL: String) {
+        let normalizedBaseURL = NanoClawAgentClient.normalizedBaseURL(baseURL)
+        nanoClawAPIBaseURL = normalizedBaseURL
+        TipTourDefaults.nanoClawAPIBaseURL = normalizedBaseURL
+        nanoClawConnectionStatus = NanoClawConnectionStatus(
+            state: .idle,
+            mode: .none,
+            baseURL: normalizedBaseURL,
+            cliExecutablePath: nanoClawCLIExecutablePath,
+            detail: "NanoClaw has not been checked yet.",
+            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
+        )
+    }
+
+    func setNanoClawCLIExecutablePath(_ cliExecutablePath: String) {
+        let trimmedPath = cliExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedPath = trimmedPath.isEmpty ? "claw" : trimmedPath
+        nanoClawCLIExecutablePath = normalizedPath
+        TipTourDefaults.nanoClawCLIExecutablePath = normalizedPath
+        nanoClawConnectionStatus = NanoClawConnectionStatus(
+            state: .idle,
+            mode: .none,
+            baseURL: nanoClawAPIBaseURL,
+            cliExecutablePath: normalizedPath,
+            detail: "NanoClaw has not been checked yet.",
+            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
+        )
+    }
+
+    func testNanoClawConnection() async {
+        nanoClawConnectionStatus = NanoClawConnectionStatus(
+            state: .checking,
+            mode: .none,
+            baseURL: nanoClawAPIBaseURL,
+            cliExecutablePath: nanoClawCLIExecutablePath,
+            detail: "Checking NanoClaw API and CLI.",
+            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
+        )
+        let status = await nanoClawAgentClient.testConnection(baseURL: nanoClawAPIBaseURL)
+        nanoClawConnectionStatus = status
+        if status.state == .connected {
+            setNanoClawAPIBaseURL(status.baseURL)
+            setNanoClawCLIExecutablePath(status.cliExecutablePath)
+            nanoClawConnectionStatus = status
+        }
+    }
+
+    func detectNanoClawConnection() async {
+        nanoClawConnectionStatus = NanoClawConnectionStatus(
+            state: .checking,
+            mode: .none,
+            baseURL: nanoClawAPIBaseURL,
+            cliExecutablePath: nanoClawCLIExecutablePath,
+            detail: "Looking for NanoClaw.",
+            detectedInstallPath: nil
+        )
+
+        let status = await nanoClawAgentClient.detectLocalConnection()
+        nanoClawConnectionStatus = status
+        switch status.state {
+        case .connected:
+            setNanoClawAPIBaseURL(status.baseURL)
+            setNanoClawCLIExecutablePath(status.cliExecutablePath)
+            nanoClawConnectionStatus = status
+        default:
+            break
+        }
+    }
+
+    var nanoClawConnectionDetail: String {
+        nanoClawConnectionStatus.detail
+    }
+
+    var nanoClawConnectionState: HermesConnectionState {
+        nanoClawConnectionStatus.state
+    }
+
+    var nanoClawDetectedInstallPath: String? {
+        nanoClawConnectionStatus.detectedInstallPath
+    }
+
     var tipTourConnections: [TipTourConnection] {
         [
             TipTourConnection(
@@ -789,6 +894,13 @@ final class CompanionManager: ObservableObject {
                 kind: .orchestrator,
                 description: "Optional long-running reasoning, memory, skills, and external tool orchestration.",
                 isEnabled: isHermesOrchestratorEnabled
+            ),
+            TipTourConnection(
+                id: "nanoclaw-orchestrator",
+                displayName: "NanoClaw",
+                kind: .orchestrator,
+                description: "Optional lightweight local long-task agent through a NanoClaw API adapter or claw CLI.",
+                isEnabled: isNanoClawOrchestratorEnabled
             )
         ]
     }
@@ -2586,7 +2698,7 @@ final class CompanionManager: ObservableObject {
         let route = PointerPromptRouter.route(
             prompt: prompt,
             targetAppName: targetAppName,
-            isHermesAutoEnabled: isHermesOrchestratorEnabled
+            longTaskAgent: activeLongTaskAgent
         )
         if sourceLabel == "TextCommand" {
             textCommandActivityText = "Routing - \(route.reason)"
@@ -2611,6 +2723,13 @@ final class CompanionManager: ObservableObject {
         case .hermesLongTask:
             print("[\(sourceLabel)] routing to Hermes: \(route.reason)")
             return try await runHermesPromptWorkflow(
+                prompt: prompt,
+                sourceLabel: sourceLabel
+            )
+
+        case .nanoClawLongTask:
+            print("[\(sourceLabel)] routing to NanoClaw: \(route.reason)")
+            return try await runNanoClawPromptWorkflow(
                 prompt: prompt,
                 sourceLabel: sourceLabel
             )
@@ -2653,6 +2772,16 @@ final class CompanionManager: ObservableObject {
             ?? NSWorkspace.shared.frontmostApplication?.localizedName
     }
 
+    private var activeLongTaskAgent: PointerPromptRouter.LongTaskAgent? {
+        if isNanoClawOrchestratorEnabled {
+            return .nanoClaw
+        }
+        if isHermesOrchestratorEnabled {
+            return .hermes
+        }
+        return nil
+    }
+
     private func currentPointerTargetApplicationForSkills() -> NSRunningApplication? {
         lastFocusHighlightContext?.hoveredWindow
             .flatMap { NSRunningApplication(processIdentifier: $0.processIdentifier) }
@@ -2675,10 +2804,27 @@ final class CompanionManager: ObservableObject {
             }
         }
 
-        let hermesPrompt = hermesPromptWithTipTourContext(prompt, sourceLabel: sourceLabel)
+        let captures: [CompanionScreenCapture]
+        if isScreenshotStreamingEnabled {
+            if shouldReportTextCommandActivity {
+                textCommandActivityText = "Capturing screens for Hermes"
+            }
+            print("[\(sourceLabel)] capturing screenshots for Hermes")
+            captures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
+        } else {
+            captures = []
+        }
+        print("[\(sourceLabel)] Hermes captures=\(captures.count)")
+
+        let hermesPrompt = hermesPromptWithTipTourContext(
+            prompt,
+            sourceLabel: sourceLabel,
+            captures: captures
+        )
         let result = try await hermesAgentClient.streamPrompt(
             hermesPrompt,
             resumeSessionID: hermesSessionID,
+            captures: captures,
             onChunk: { [weak self] accumulatedText in
                 await MainActor.run {
                     guard let self else { return }
@@ -2729,15 +2875,91 @@ final class CompanionManager: ObservableObject {
         )
     }
 
-    private func hermesPromptWithTipTourContext(_ prompt: String, sourceLabel: String) -> String {
+    private func runNanoClawPromptWorkflow(
+        prompt: String,
+        sourceLabel: String
+    ) async throws -> TipTourEngineSubmissionResult {
+        let shouldReportTextCommandActivity = sourceLabel == "TextCommand"
+        if shouldReportTextCommandActivity {
+            isTextCommandNanoClawWorkflowActive = true
+            textCommandActivityText = "Connecting to NanoClaw"
+        }
+        defer {
+            if shouldReportTextCommandActivity {
+                isTextCommandNanoClawWorkflowActive = false
+            }
+        }
+
+        let nanoClawPrompt = hermesPromptWithTipTourContext(prompt, sourceLabel: sourceLabel)
+        let result = try await nanoClawAgentClient.streamPrompt(
+            nanoClawPrompt,
+            resumeSessionID: nanoClawSessionID,
+            onChunk: { [weak self] accumulatedText in
+                await MainActor.run {
+                    guard let self else { return }
+                    self.lastTranscript = accumulatedText
+                    if sourceLabel == "TextCommand" {
+                        self.textCommandActivityText = "NanoClaw says - \(self.compactStatusText(accumulatedText, showingTail: true))"
+                    }
+                }
+            },
+            onToolProgress: { [weak self] progressText in
+                await MainActor.run {
+                    guard let self else { return }
+                    let statusText = "NanoClaw action - \(progressText)"
+                    self.lastTranscript = statusText
+                    if sourceLabel == "TextCommand" {
+                        self.textCommandActivityText = statusText
+                    }
+                }
+            },
+            onStatus: { [weak self] statusText in
+                await MainActor.run {
+                    guard let self else { return }
+                    if sourceLabel == "TextCommand" {
+                        self.textCommandActivityText = statusText
+                    }
+                }
+            }
+        )
+
+        nanoClawSessionID = result.sessionID
+        let finalText = result.responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !finalText.isEmpty {
+            lastTranscript = finalText
+            if sourceLabel == "TextCommand" {
+                textCommandActivityText = "NanoClaw - \(compactStatusText(finalText))"
+            }
+        } else if sourceLabel == "TextCommand" {
+            textCommandActivityText = "NanoClaw finished"
+        }
+
+        return TipTourEngineSubmissionResult(
+            ok: true,
+            reason: nil,
+            message: finalText.isEmpty ? "NanoClaw completed without a text response." : finalText,
+            acceptedSteps: 0,
+            ignoredSteps: 0,
+            activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
+        )
+    }
+
+    private func hermesPromptWithTipTourContext(
+        _ prompt: String,
+        sourceLabel: String,
+        captures: [CompanionScreenCapture] = []
+    ) -> String {
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let activeApp = frontmostApplication?.localizedName ?? "unknown"
         let screenshotMode = isScreenshotStreamingEnabled ? "enabled" : "disabled"
         let groundingMode = isAccurateGroundingEnabled ? "enabled" : "disabled"
+        let screenshotSummary = captures.map { capture in
+            "\(capture.label): \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels, displayFrame=\(capture.displayFrame)"
+        }.joined(separator: "\n")
         let activeAppSkillInstructions = MarkdownAppSkillRegistry.shared
             .plannerInstructions(for: frontmostApplication)
             .map { "\n\($0)\n" } ?? ""
-        let currentFocusHighlightContext = plannerFocusHighlightContextDescription(captures: [])
+        let currentFocusHighlightContext = plannerFocusHighlightContextDescription(captures: captures)
             .map { "\n\($0)\n" } ?? "none"
         return """
         Source: \(sourceLabel)
@@ -2746,6 +2968,8 @@ final class CompanionManager: ObservableObject {
         TipTour Autopilot: \(isAutopilotEnabled ? "enabled" : "disabled")
         TipTour Accurate Grounding: \(groundingMode)
         TipTour screenshot streaming setting: \(screenshotMode)
+        Fresh screenshots attached to this Hermes turn: \(captures.isEmpty ? "none" : "\n\(screenshotSummary)")
+        During long tasks Hermes can call http://127.0.0.1:19474/v1/screenshots for a fresh raw JPEG screenshot payload when the Screenshots toggle is enabled.
         \(activeAppSkillInstructions)
         Current TipTour focus highlight:
         \(currentFocusHighlightContext)

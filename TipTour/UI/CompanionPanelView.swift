@@ -222,13 +222,17 @@ struct CompanionPanelView: View {
                 }
 
                 compactControlButton(
-                    title: companionManager.isHermesOrchestratorEnabled ? "Auto" : "Local",
-                    subtitle: companionManager.isHermesOrchestratorEnabled ? "router" : "planner",
-                    systemImage: companionManager.isHermesOrchestratorEnabled ? "link" : "bolt",
-                    isActive: companionManager.isHermesOrchestratorEnabled,
-                    helpText: "Route long tasks to Hermes"
+                    title: longTaskRouterTitle,
+                    subtitle: isLongTaskRouterEnabled ? "router" : "planner",
+                    systemImage: isLongTaskRouterEnabled ? "link" : "bolt",
+                    isActive: isLongTaskRouterEnabled,
+                    helpText: "Toggle long-task routing"
                 ) {
-                    companionManager.setHermesOrchestratorEnabled(!companionManager.isHermesOrchestratorEnabled)
+                    if companionManager.isNanoClawOrchestratorEnabled {
+                        companionManager.setNanoClawOrchestratorEnabled(false)
+                    } else {
+                        companionManager.setHermesOrchestratorEnabled(!companionManager.isHermesOrchestratorEnabled)
+                    }
                 }
             }
 
@@ -717,6 +721,18 @@ struct CompanionPanelView: View {
                     set: { companionManager.setHermesOrchestratorEnabled($0) }
                 )
             )
+
+            connectionToggleRow(
+                title: "NanoClaw Auto",
+                subtitle: companionManager.isNanoClawOrchestratorEnabled
+                    ? "route long tasks to NanoClaw"
+                    : "NanoClaw idle",
+                systemImage: "shippingbox",
+                isOn: Binding(
+                    get: { companionManager.isNanoClawOrchestratorEnabled },
+                    set: { companionManager.setNanoClawOrchestratorEnabled($0) }
+                )
+            )
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
@@ -728,6 +744,20 @@ struct CompanionPanelView: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
         )
+    }
+
+    private var isLongTaskRouterEnabled: Bool {
+        companionManager.isHermesOrchestratorEnabled || companionManager.isNanoClawOrchestratorEnabled
+    }
+
+    private var longTaskRouterTitle: String {
+        if companionManager.isNanoClawOrchestratorEnabled {
+            return "NanoClaw"
+        }
+        if companionManager.isHermesOrchestratorEnabled {
+            return "Hermes"
+        }
+        return "Local"
     }
 
     private func connectionToggleRow(

@@ -18,6 +18,9 @@ enum TipTourDefaults {
         case isDetectionOverlayEnabled
         case isHermesOrchestratorEnabled
         case hermesAPIBaseURL
+        case isNanoClawOrchestratorEnabled
+        case nanoClawAPIBaseURL
+        case nanoClawCLIExecutablePath
         case isNekoModeEnabled
         case isPanelPinned
         case isScreenshotStreamingEnabled
@@ -36,6 +39,9 @@ enum TipTourDefaults {
             Key.isDetectionOverlayEnabled.rawValue: false,
             Key.isHermesOrchestratorEnabled.rawValue: false,
             Key.hermesAPIBaseURL.rawValue: "http://127.0.0.1:8642",
+            Key.isNanoClawOrchestratorEnabled.rawValue: false,
+            Key.nanoClawAPIBaseURL.rawValue: "http://127.0.0.1:10961",
+            Key.nanoClawCLIExecutablePath.rawValue: "claw",
             Key.isNekoModeEnabled.rawValue: false,
             Key.isPanelPinned.rawValue: false,
             Key.isScreenshotStreamingEnabled.rawValue: true
@@ -93,6 +99,33 @@ enum TipTourDefaults {
         }
     }
 
+    static var isNanoClawOrchestratorEnabled: Bool {
+        get { bool(for: .isNanoClawOrchestratorEnabled) }
+        set { set(newValue, for: .isNanoClawOrchestratorEnabled) }
+    }
+
+    static var nanoClawAPIBaseURL: String {
+        get {
+            string(for: .nanoClawAPIBaseURL)
+                ?? "http://127.0.0.1:10961"
+        }
+        set {
+            let trimmedValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmedValue.isEmpty ? "http://127.0.0.1:10961" : trimmedValue, forKey: Key.nanoClawAPIBaseURL.rawValue)
+        }
+    }
+
+    static var nanoClawCLIExecutablePath: String {
+        get {
+            string(for: .nanoClawCLIExecutablePath)
+                ?? "claw"
+        }
+        set {
+            let trimmedValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmedValue.isEmpty ? "claw" : trimmedValue, forKey: Key.nanoClawCLIExecutablePath.rawValue)
+        }
+    }
+
     static var isNekoModeEnabled: Bool {
         get { bool(for: .isNekoModeEnabled) }
         set { set(newValue, for: .isNekoModeEnabled) }
@@ -133,10 +166,11 @@ enum TipTourDefaults {
              .isAccurateGroundingEnabled,
              .isDetectionOverlayEnabled,
              .isHermesOrchestratorEnabled,
+             .isNanoClawOrchestratorEnabled,
              .isNekoModeEnabled,
              .isPanelPinned:
             return false
-        case .hermesAPIBaseURL:
+        case .hermesAPIBaseURL, .nanoClawAPIBaseURL, .nanoClawCLIExecutablePath:
             return false
         }
     }

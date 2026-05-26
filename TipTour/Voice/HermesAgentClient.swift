@@ -65,12 +65,60 @@ struct HermesAgentClient {
 
     private struct Message: Encodable {
         let role: String
-        let content: String
+        let content: MessageContent
+    }
+
+    private enum MessageContent: Encodable {
+        case text(String)
+        case parts([ContentPart])
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            switch self {
+            case .text(let text):
+                try container.encode(text)
+            case .parts(let parts):
+                try container.encode(parts)
+            }
+        }
+    }
+
+    private struct ContentPart: Encodable {
+        let type: String
+        let text: String?
+        let imageURL: ImageURL?
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case text
+            case imageURL = "image_url"
+        }
+
+        static func text(_ text: String) -> ContentPart {
+            ContentPart(type: "text", text: text, imageURL: nil)
+        }
+
+        static func image(jpegData: Data, detail: String = "high") -> ContentPart {
+            ContentPart(
+                type: "image_url",
+                text: nil,
+                imageURL: ImageURL(
+                    url: "data:image/jpeg;base64,\(jpegData.base64EncodedString())",
+                    detail: detail
+                )
+            )
+        }
+    }
+
+    private struct ImageURL: Encodable {
+        let url: String
+        let detail: String?
     }
 
     func streamPrompt(
         _ prompt: String,
         resumeSessionID: String?,
+        captures: [CompanionScreenCapture] = [],
         onChunk: @escaping (String) async -> Void,
         onToolProgress: @escaping (String) async -> Void,
         onStatus: @escaping (String) async -> Void = { _ in }
@@ -79,6 +127,44 @@ struct HermesAgentClient {
             baseURL: TipTourDefaults.hermesAPIBaseURL,
             path: "/v1/chat/completions"
         )
+
+        do {
+            return try await streamPromptRequest(
+                endpoint: endpoint,
+                prompt: prompt,
+                resumeSessionID: resumeSessionID,
+                captures: captures,
+                onChunk: onChunk,
+                onToolProgress: onToolProgress,
+                onStatus: onStatus
+            )
+        } catch {
+            guard !captures.isEmpty, Self.shouldRetryWithoutImagePayload(after: error) else {
+                throw error
+            }
+
+            await onStatus("Hermes image payload unsupported - retrying text-only")
+            return try await streamPromptRequest(
+                endpoint: endpoint,
+                prompt: prompt,
+                resumeSessionID: resumeSessionID,
+                captures: [],
+                onChunk: onChunk,
+                onToolProgress: onToolProgress,
+                onStatus: onStatus
+            )
+        }
+    }
+
+    private func streamPromptRequest(
+        endpoint: URL,
+        prompt: String,
+        resumeSessionID: String?,
+        captures: [CompanionScreenCapture],
+        onChunk: @escaping (String) async -> Void,
+        onToolProgress: @escaping (String) async -> Void,
+        onStatus: @escaping (String) async -> Void
+    ) async throws -> HermesAgentStreamResult {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -86,8 +172,8 @@ struct HermesAgentClient {
             ChatRequest(
                 model: "hermes-agent",
                 messages: [
-                    Message(role: "system", content: Self.systemPrompt),
-                    Message(role: "user", content: prompt)
+                    Message(role: "system", content: .text(Self.systemPrompt)),
+                    Message(role: "user", content: Self.userMessageContent(prompt: prompt, captures: captures))
                 ],
                 stream: true,
                 sessionID: resumeSessionID
@@ -165,6 +251,38 @@ struct HermesAgentClient {
         )
     }
 
+    private static func shouldRetryWithoutImagePayload(after error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == "HermesAgentClient" else { return false }
+        return [400, 415, 422].contains(nsError.code)
+    }
+
+    private static func userMessageContent(
+        prompt: String,
+        captures: [CompanionScreenCapture]
+    ) -> MessageContent {
+        let attachedCaptures = Array(captures.prefix(2))
+        guard !attachedCaptures.isEmpty else {
+            return .text(prompt)
+        }
+
+        let screenshotSummary = attachedCaptures
+            .map { capture in
+                "\(capture.label): \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels"
+            }
+            .joined(separator: "\n")
+        var parts: [ContentPart] = [
+            .text("""
+            \(prompt)
+
+            Fresh TipTour screenshots are attached to this Hermes turn:
+            \(screenshotSummary)
+            """)
+        ]
+        parts.append(contentsOf: attachedCaptures.map { .image(jpegData: $0.imageData) })
+        return .parts(parts)
+    }
+
     private static let systemPrompt = """
     You are Hermes running behind TipTour.
 
@@ -174,12 +292,15 @@ struct HermesAgentClient {
 
     TipTour endpoints:
     - GET http://127.0.0.1:19474/v1/observe
+    - GET http://127.0.0.1:19474/v1/screenshots
     - GET http://127.0.0.1:19474/v1/skills
     - GET http://127.0.0.1:19474/v1/skills/active
     - GET http://127.0.0.1:19474/v1/targets
     - GET http://127.0.0.1:19474/v1/action-history
     - POST http://127.0.0.1:19474/v1/plan-next-action
     - POST http://127.0.0.1:19474/v1/workflow-plan
+
+    TipTour may attach fresh raw screenshots to the initial Hermes turn when the Screenshots toggle is enabled. During a long task, call /v1/screenshots when raw visual layout matters and call /v1/targets when you need grounded visible target IDs/marks/boxes. Call /v1/targets after opening menus, after each action that changes the UI, and before choosing from visible menu items.
 
     /v1/targets is the single target graph. It may contain AX/CDP/native OCR/YOLO targets. Prefer target_id or target_mark from that response over fuzzy text labels.
 
@@ -188,9 +309,15 @@ struct HermesAgentClient {
     Prefer one desktop action at a time. For simple visible clicks, call /v1/plan-next-action with JSON like:
     {"goal":"open the Add menu","app":"Blender","target_label":"Add","action":"click","execute":true}
 
-    For keyboard or app actions, call /v1/workflow-plan with exactly one step. TipTour clamps to one action and will handle local grounding, pointer animation, clicking, typing, validation, and repair.
+    For keyboard or app actions, call /v1/workflow-plan with exactly one step. TipTour rejects requests containing more than one step. Send only the next physical action, wait for the /v1/workflow-plan response to report completion, then call /v1/observe or /v1/targets before continuing.
 
-    For cross-app tasks, loop deliberately: observe, perform exactly one action, inspect the result/action history, then observe again before the next action. Do not send a multi-step plan and do not assume the starting app remains the target after an app switch.
+    For cross-app tasks and long Blender tasks, loop deliberately: observe, perform exactly one action, wait for completion, inspect the response/action history, then observe or request targets again before the next action. Do not send a multi-step plan and do not assume the starting app remains the target after an app switch.
+
+    Blender-specific discipline:
+    - Prefer visible menu target clicks for Add > Mesh > Cube/Plane/Cone. Open the menu, call /v1/targets, pick the visible menu item by target_id or target_mark, then wait.
+    - Confirm Blender delete prompts with a targetless Return key action. Do not click fuzzy OCR targets to confirm deletion.
+    - Modal transforms are multiple separate actions. For example scale-by-3 is three separate /v1/workflow-plan calls: pressKey S, then type value "3", then pressKey Return.
+    - Do not press S twice unless the first scale command was cancelled. If TipTour just completed "press S", the next action should usually be a numeric type, axis key, or Return.
 
     Workflow-plan examples:
     - Press a key: {"goal":"press return","app":"Target App","steps":[{"type":"pressKey","label":"Return"}]}
