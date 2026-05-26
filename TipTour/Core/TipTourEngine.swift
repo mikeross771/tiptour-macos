@@ -15,16 +15,30 @@ struct TipTourEngineSubmissionResult: Encodable {
     let ok: Bool
     let reason: String?
     let message: String?
+    let traceID: String?
     let acceptedSteps: Int
     let ignoredSteps: Int
     let activeApp: String?
     let workflowOutcome: TipTourEngineWorkflowOutcome?
     let targetCountAfterAction: Int?
 
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case reason
+        case message
+        case traceID = "trace_id"
+        case acceptedSteps
+        case ignoredSteps
+        case activeApp
+        case workflowOutcome
+        case targetCountAfterAction
+    }
+
     init(
         ok: Bool,
         reason: String?,
         message: String?,
+        traceID: String? = nil,
         acceptedSteps: Int,
         ignoredSteps: Int,
         activeApp: String?,
@@ -34,6 +48,7 @@ struct TipTourEngineSubmissionResult: Encodable {
         self.ok = ok
         self.reason = reason
         self.message = message
+        self.traceID = traceID
         self.acceptedSteps = acceptedSteps
         self.ignoredSteps = ignoredSteps
         self.activeApp = activeApp
@@ -108,6 +123,7 @@ struct TipTourEngineGroundedTarget: Encodable {
 
 struct TipTourEngineGroundTargetResult: Encodable {
     let ok: Bool
+    let traceID: String
     let reason: String?
     let message: String?
     let activeAppName: String?
@@ -120,6 +136,23 @@ struct TipTourEngineGroundTargetResult: Encodable {
     let matchedBy: String?
     let aiMatchLatencyMs: Int?
     let target: TipTourEngineGroundedTarget?
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case traceID = "trace_id"
+        case reason
+        case message
+        case activeAppName
+        case activeBundleIdentifier
+        case refreshed
+        case goal
+        case query
+        case actionType
+        case candidateCount
+        case matchedBy
+        case aiMatchLatencyMs
+        case target
+    }
 }
 
 struct TipTourEngineScreenshotList: Encodable {
@@ -155,6 +188,7 @@ struct TipTourEngineVisualContextDecision: Encodable {
 
 struct TipTourEngineVisualContextSnapshot: Encodable {
     let ok: Bool
+    let traceID: String?
     let reason: String?
     let message: String?
     let snapshotID: String
@@ -169,6 +203,25 @@ struct TipTourEngineVisualContextSnapshot: Encodable {
     let focusTarget: TipTourEngineGroundedTarget?
     let screenshotHash: String?
     let screenshots: [TipTourEngineScreenshot]
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case traceID = "trace_id"
+        case reason
+        case message
+        case snapshotID
+        case capturedAt
+        case activeAppName
+        case activeBundleIdentifier
+        case activePlanGoal
+        case intent
+        case decision
+        case targetCount
+        case targets
+        case focusTarget
+        case screenshotHash
+        case screenshots
+    }
 }
 
 private struct TipTourVisualContextScreenshotCaptureResult {
@@ -213,6 +266,7 @@ struct TipTourEngineActionValidation: Encodable {
 }
 
 struct TipTourEngineActionAttempt: Encodable {
+    let traceID: String
     let attemptNumber: Int
     let timestamp: String
     let target: LocalPerceptionTargetCache.SnapshotTarget
@@ -220,6 +274,17 @@ struct TipTourEngineActionAttempt: Encodable {
     let submission: TipTourEngineSubmissionResult
     let workflowOutcome: TipTourEngineWorkflowOutcome
     let validation: TipTourEngineActionValidation
+
+    private enum CodingKeys: String, CodingKey {
+        case traceID = "trace_id"
+        case attemptNumber
+        case timestamp
+        case target
+        case plannedStep
+        case submission
+        case workflowOutcome
+        case validation
+    }
 }
 
 struct TipTourEngineActionHistory: Encodable {
@@ -229,6 +294,7 @@ struct TipTourEngineActionHistory: Encodable {
 
 struct TipTourEnginePlanNextActionResult: Encodable {
     let ok: Bool
+    let traceID: String
     let reason: String?
     let message: String?
     let activeApp: String?
@@ -239,6 +305,21 @@ struct TipTourEnginePlanNextActionResult: Encodable {
     let attempts: [TipTourEngineActionAttempt]
     let repaired: Bool
     let targets: [LocalPerceptionTargetCache.SnapshotTarget]
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case traceID = "trace_id"
+        case reason
+        case message
+        case activeApp
+        case plannedStep
+        case submission
+        case workflowOutcome
+        case validation
+        case attempts
+        case repaired
+        case targets
+    }
 }
 
 @MainActor
@@ -321,8 +402,10 @@ final class TipTourEngine {
         targetLabel: String?,
         targetID: String?,
         targetMark: Int?,
-        refresh: Bool
+        refresh: Bool,
+        traceID: String? = nil
     ) async -> TipTourEngineVisualContextSnapshot {
+        let traceID = traceID ?? TipTourActionTrace.makeID(source: "visual")
         let requestedMode = normalizedVisualContextMode(rawRequestedMode)
         let policyReason = normalizedVisualContextReason(rawReason)
         if refresh || !requestedApplicationIsFrontmost(app) {
@@ -385,6 +468,7 @@ final class TipTourEngine {
             name: "visual_context",
             status: "ok",
             metadata: [
+                TipTourActionTrace.metadataKey: traceID,
                 "snapshot_id": snapshotID,
                 "mode": finalDecision.mode,
                 "requested_mode": requestedMode,
@@ -399,6 +483,7 @@ final class TipTourEngine {
 
         return TipTourEngineVisualContextSnapshot(
             ok: true,
+            traceID: traceID,
             reason: nil,
             message: "Prepared TipTour visual context.",
             snapshotID: snapshotID,
@@ -455,6 +540,8 @@ final class TipTourEngine {
         allowScreenshotPlanning: Bool,
         allowAIMatch: Bool
     ) async -> TipTourEngineGroundTargetResult {
+        let traceID = TipTourActionTrace.makeID(source: "ground")
+        let groundStartedAt = Date()
         let query = nonEmpty(targetLabel) ?? nonEmpty(goal)
         let requestedAppWasAlreadyFrontmost = requestedApplicationIsFrontmost(app)
         let pointerActionRequest = PointerActionRequest(
@@ -466,7 +553,8 @@ final class TipTourEngine {
             targetMark: targetMark,
             execute: false,
             allowScreenshotPlanning: allowScreenshotPlanning,
-            validateStateChange: false
+            validateStateChange: false,
+            traceID: traceID
         )
 
         recordEngineEvent(
@@ -497,12 +585,16 @@ final class TipTourEngine {
                 status: "failed",
                 message: "No local perception targets were available.",
                 metadata: pointerActionMetadata(pointerActionRequest).merging(
-                    ["reason": "no_local_targets"],
+                    [
+                        "reason": "no_local_targets",
+                        "elapsed_ms": String(Self.elapsedMilliseconds(since: groundStartedAt))
+                    ],
                     uniquingKeysWith: { existing, _ in existing }
                 )
             )
             return TipTourEngineGroundTargetResult(
                 ok: false,
+                traceID: traceID,
                 reason: "no_local_targets",
                 message: "No local YOLO/OCR targets are available yet. Turn on Accurate Grounding or wait for a fresh perception pass.",
                 activeAppName: activeApp?.localizedName,
@@ -568,13 +660,15 @@ final class TipTourEngine {
                     [
                         "reason": reason,
                         "allow_ai_match": String(allowAIMatch),
-                        "target_count": String(targets.count)
+                        "target_count": String(targets.count),
+                        "elapsed_ms": String(Self.elapsedMilliseconds(since: groundStartedAt))
                     ],
                     uniquingKeysWith: { existing, _ in existing }
                 )
             )
             return TipTourEngineGroundTargetResult(
                 ok: false,
+                traceID: traceID,
                 reason: reason,
                 message: message,
                 activeAppName: activeApp?.localizedName,
@@ -601,7 +695,8 @@ final class TipTourEngine {
                         "matched_by": matchedBy,
                         "refreshed": String(shouldRefreshPerception),
                         "ai_match_latency_ms": aiMatchLatencyMs.map(String.init) ?? "none",
-                        "target_count": String(targets.count)
+                        "target_count": String(targets.count),
+                        "elapsed_ms": String(Self.elapsedMilliseconds(since: groundStartedAt))
                     ],
                     uniquingKeysWith: { existing, _ in existing }
                 ),
@@ -610,6 +705,7 @@ final class TipTourEngine {
         )
         return TipTourEngineGroundTargetResult(
             ok: true,
+            traceID: traceID,
             reason: nil,
             message: "Grounded one visible target.",
             activeAppName: activeApp?.localizedName,
@@ -632,17 +728,23 @@ final class TipTourEngine {
         )
     }
 
+    func agentContract() -> TipTourAgentContractSnapshot {
+        TipTourAgentContract.snapshot
+    }
+
     func startLongTask(
         title: String?,
         prompt: String,
         app: String?,
-        steps: [TipTourLongTaskStep]
+        steps: [TipTourLongTaskStep],
+        traceID: String? = nil
     ) -> TipTourLongTaskStartResponse {
         longTaskCoordinator.startTask(
             title: title,
             prompt: prompt,
             app: app,
-            steps: steps
+            steps: steps,
+            traceID: traceID
         )
     }
 
@@ -980,6 +1082,7 @@ final class TipTourEngine {
         allowScreenshotPlanning: Bool,
         validateStateChange: Bool
     ) async -> TipTourEnginePlanNextActionResult {
+        let traceID = TipTourActionTrace.makeID(source: "plan")
         let pointerActionRequest = PointerActionRequest(
             goal: goal,
             app: app,
@@ -989,12 +1092,16 @@ final class TipTourEngine {
             targetMark: nil,
             execute: execute,
             allowScreenshotPlanning: allowScreenshotPlanning,
-            validateStateChange: validateStateChange
+            validateStateChange: validateStateChange,
+            traceID: traceID
         )
         return await runPointerAction(pointerActionRequest)
     }
 
     func runPointerAction(_ pointerActionRequest: PointerActionRequest) async -> TipTourEnginePlanNextActionResult {
+        let traceID = pointerActionRequest.traceID ?? TipTourActionTrace.makeID(source: "action")
+        let pointerActionRequest = pointerActionRequest.withTraceID(traceID)
+        let actionStartedAt = Date()
         recordEngineEvent(
             name: "pointer_action",
             status: "started",
@@ -1028,12 +1135,16 @@ final class TipTourEngine {
                 status: "failed",
                 message: "No local perception targets were available.",
                 metadata: pointerActionMetadata(pointerActionRequest).merging(
-                    ["reason": "no_local_targets"],
+                    [
+                        "reason": "no_local_targets",
+                        "elapsed_ms": String(Self.elapsedMilliseconds(since: actionStartedAt))
+                    ],
                     uniquingKeysWith: { existing, _ in existing }
                 )
             )
             return TipTourEnginePlanNextActionResult(
                 ok: false,
+                traceID: traceID,
                 reason: "no_local_targets",
                 message: "No local YOLO/OCR targets are available yet. Turn on Accurate Grounding or wait for a fresh perception pass.",
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1077,13 +1188,15 @@ final class TipTourEngine {
                 metadata: pointerActionMetadata(pointerActionRequest).merging(
                     [
                         "reason": reason,
-                        "target_count": String(targets.count)
+                        "target_count": String(targets.count),
+                        "elapsed_ms": String(Self.elapsedMilliseconds(since: actionStartedAt))
                     ],
                     uniquingKeysWith: { existing, _ in existing }
                 )
             )
             return TipTourEnginePlanNextActionResult(
                 ok: false,
+                traceID: traceID,
                 reason: reason,
                 message: message,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1123,6 +1236,7 @@ final class TipTourEngine {
             )
             return TipTourEnginePlanNextActionResult(
                 ok: true,
+                traceID: traceID,
                 reason: nil,
                 message: "Planned one grounded TipTour action.",
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1142,7 +1256,8 @@ final class TipTourEngine {
             requestedActionType: pointerActionRequest.actionType,
             initialTarget: matchedTarget,
             initialTargets: targets,
-            requireStateChange: pointerActionRequest.validateStateChange
+            requireStateChange: pointerActionRequest.validateStateChange,
+            traceID: traceID
         )
 
         recordEngineEvent(
@@ -1153,13 +1268,15 @@ final class TipTourEngine {
                 [
                     "reason": executionResult.reason ?? "none",
                     "attempt_count": String(executionResult.attempts.count),
-                    "latest_target_count": String(executionResult.latestTargets.count)
+                    "latest_target_count": String(executionResult.latestTargets.count),
+                    "elapsed_ms": String(Self.elapsedMilliseconds(since: actionStartedAt))
                 ],
                 uniquingKeysWith: { existing, _ in existing }
             )
         )
         return TipTourEnginePlanNextActionResult(
             ok: executionResult.ok,
+            traceID: traceID,
             reason: executionResult.reason,
             message: executionResult.message,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1174,6 +1291,8 @@ final class TipTourEngine {
     }
 
     func submitSingleActionWorkflowPlan(_ plan: WorkflowPlan) -> TipTourEngineSubmissionResult {
+        let traceID = plan.traceID ?? TipTourActionTrace.makeID(source: "workflow")
+        let plan = plan.withTraceID(traceID)
         recordEngineEvent(
             name: "workflow_plan",
             status: "received",
@@ -1193,6 +1312,7 @@ final class TipTourEngine {
                 ok: false,
                 reason: "autopilot_disabled",
                 message: "TipTour Autopilot is off. Turn it on before external harnesses can execute actions.",
+                traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: plan.steps.count,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1213,6 +1333,7 @@ final class TipTourEngine {
                 ok: false,
                 reason: "action_driver_disabled",
                 message: "CUA Driver is off. Turn it on before TipTour can execute desktop actions.",
+                traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: plan.steps.count,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1227,6 +1348,7 @@ final class TipTourEngine {
                 name: "workflow_plan_superseded",
                 status: "warning",
                 metadata: [
+                    TipTourActionTrace.metadataKey: traceID,
                     "old_goal": activePlan.goal,
                     "new_goal": plan.goal
                 ]
@@ -1254,6 +1376,7 @@ final class TipTourEngine {
                 ok: false,
                 reason: "empty_steps",
                 message: "Workflow plan must contain at least one step.",
+                traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: 0,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1269,7 +1392,8 @@ final class TipTourEngine {
                 metadata: workflowPlanMetadata(plan).merging(
                     [
                         "reason": "single_action_required",
-                        "normalized_step_count": String(normalizedSteps.count)
+                        "normalized_step_count": String(normalizedSteps.count),
+                        "suggested_endpoint": "/v1/tasks"
                     ],
                     uniquingKeysWith: { existing, _ in existing }
                 )
@@ -1277,7 +1401,8 @@ final class TipTourEngine {
             return TipTourEngineSubmissionResult(
                 ok: false,
                 reason: "single_action_required",
-                message: "TipTour external harness mode accepts exactly one action per /v1/workflow-plan request. Send only the next action, wait for the response to complete, then observe or request targets before continuing.",
+                message: "TipTour external harness mode accepts exactly one action per /v1/workflow-plan request. Send only the next action, or use POST /v1/tasks for a concrete deterministic mini-sequence such as S, Z, type value, Return.",
+                traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: normalizedSteps.count,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1301,6 +1426,7 @@ final class TipTourEngine {
                 ok: false,
                 reason: invalidReason,
                 message: "Workflow step is missing the required payload for \(firstStep.type.rawValue).",
+                traceID: traceID,
                 acceptedSteps: 0,
                 ignoredSteps: normalizedSteps.count,
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1310,7 +1436,8 @@ final class TipTourEngine {
         let singleActionPlan = WorkflowPlan(
             goal: plan.goal,
             app: plan.app,
-            steps: [firstStep]
+            steps: [firstStep],
+            traceID: traceID
         )
 
         let actionLabel = firstStep.label ?? firstStep.value ?? "<unlabeled>"
@@ -1330,6 +1457,7 @@ final class TipTourEngine {
             ok: true,
             reason: nil,
             message: "Accepted one TipTour action.",
+            traceID: traceID,
             acceptedSteps: 1,
             ignoredSteps: 0,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -1337,13 +1465,15 @@ final class TipTourEngine {
     }
 
     func submitSingleActionWorkflowPlanAndWait(_ plan: WorkflowPlan) async -> TipTourEngineSubmissionResult {
-        let submission = submitSingleActionWorkflowPlan(plan)
+        let traceID = plan.traceID ?? TipTourActionTrace.makeID(source: "workflow")
+        let tracedPlan = plan.withTraceID(traceID)
+        let submission = submitSingleActionWorkflowPlan(tracedPlan)
         guard submission.ok else {
             recordEngineEvent(
                 name: "workflow_plan_result",
                 status: "rejected",
                 message: submission.message,
-                metadata: workflowPlanMetadata(plan).merging(
+                metadata: workflowPlanMetadata(tracedPlan).merging(
                     ["reason": submission.reason ?? "unknown"],
                     uniquingKeysWith: { existing, _ in existing }
                 )
@@ -1352,7 +1482,7 @@ final class TipTourEngine {
         }
 
         let workflowOutcome = await waitForWorkflowSettlement()
-        if shouldRefreshPerceptionAfterWorkflowPlan(plan) {
+        if shouldRefreshPerceptionAfterWorkflowPlan(tracedPlan) {
             await refreshLocalPerception("harness workflow-plan post-action")
         }
         let completed = workflowOutcome.status == "completed"
@@ -1360,7 +1490,7 @@ final class TipTourEngine {
             name: "workflow_plan_result",
             status: completed ? "completed" : "failed",
             message: completed ? "WorkflowRunner completed the action." : workflowOutcome.message,
-            metadata: workflowPlanMetadata(plan).merging(
+            metadata: workflowPlanMetadata(tracedPlan).merging(
                 [
                     "workflow_status": workflowOutcome.status,
                     "reason": workflowOutcome.reason ?? "none",
@@ -1375,6 +1505,7 @@ final class TipTourEngine {
             ok: completed,
             reason: completed ? nil : workflowOutcome.reason,
             message: completed ? "Executed one TipTour action." : workflowOutcome.message,
+            traceID: traceID,
             acceptedSteps: submission.acceptedSteps,
             ignoredSteps: submission.ignoredSteps,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1464,10 +1595,12 @@ final class TipTourEngine {
         step: WorkflowStep,
         pointerActionRequest: PointerActionRequest
     ) async -> TipTourEnginePlanNextActionResult {
+        let traceID = pointerActionRequest.traceID ?? TipTourActionTrace.makeID(source: "targetless")
         let plannedStep = plannedTargetlessActionStep(step)
         guard pointerActionRequest.execute else {
             return TipTourEnginePlanNextActionResult(
                 ok: true,
+                traceID: traceID,
                 reason: nil,
                 message: "Planned one targetless TipTour action.",
                 activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -1485,12 +1618,14 @@ final class TipTourEngine {
             WorkflowPlan(
                 goal: pointerActionRequest.goal,
                 app: pointerActionRequest.app,
-                steps: [step]
+                steps: [step],
+                traceID: traceID
             )
         )
 
         return TipTourEnginePlanNextActionResult(
             ok: submission.ok,
+            traceID: traceID,
             reason: submission.reason,
             message: submission.message,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName,
@@ -2435,7 +2570,8 @@ final class TipTourEngine {
         requestedActionType: WorkflowStep.StepType,
         initialTarget: LocalPerceptionTargetCache.SnapshotTarget,
         initialTargets: [LocalPerceptionTargetCache.SnapshotTarget],
-        requireStateChange: Bool
+        requireStateChange: Bool,
+        traceID: String
     ) async -> GroundedActionExecutionResult {
         let attempt = await executeGroundedActionAttempt(
             attemptNumber: 1,
@@ -2444,7 +2580,8 @@ final class TipTourEngine {
             actionType: requestedActionType,
             target: initialTarget,
             targetsBeforeAttempt: initialTargets,
-            requireStateChange: requireStateChange
+            requireStateChange: requireStateChange,
+            traceID: traceID
         )
         recordActionAttempt(attempt)
 
@@ -2490,7 +2627,8 @@ final class TipTourEngine {
         actionType: WorkflowStep.StepType,
         target: LocalPerceptionTargetCache.SnapshotTarget,
         targetsBeforeAttempt: [LocalPerceptionTargetCache.SnapshotTarget],
-        requireStateChange: Bool
+        requireStateChange: Bool,
+        traceID: String
     ) async -> TipTourEngineActionAttempt {
         let step = workflowStep(
             actionType: actionType,
@@ -2505,7 +2643,8 @@ final class TipTourEngine {
             WorkflowPlan(
                 goal: goal,
                 app: app,
-                steps: [step]
+                steps: [step],
+                traceID: traceID
             )
         )
 
@@ -2530,6 +2669,7 @@ final class TipTourEngine {
         )
 
         return TipTourEngineActionAttempt(
+            traceID: traceID,
             attemptNumber: attemptNumber,
             timestamp: Self.iso8601Formatter.string(from: Date()),
             target: target,
@@ -2661,6 +2801,7 @@ final class TipTourEngine {
             status: attempt.submission.ok && attempt.workflowOutcome.status == "completed" ? "ok" : "failed",
             message: attempt.workflowOutcome.message,
             metadata: [
+                TipTourActionTrace.metadataKey: attempt.traceID,
                 "attempt": String(attempt.attemptNumber),
                 "target_label": attempt.target.label,
                 "target_id": attempt.target.id,
@@ -2692,11 +2833,15 @@ final class TipTourEngine {
     }
 
     private func workflowPlanMetadata(_ plan: WorkflowPlan) -> [String: String] {
-        [
+        var metadata = [
             "goal": plan.goal,
             "app": plan.app ?? "unknown",
             "step_count": String(plan.steps.count)
         ]
+        if let traceID = plan.traceID {
+            metadata[TipTourActionTrace.metadataKey] = traceID
+        }
+        return metadata
     }
 
     private func workflowStepMetadata(_ step: WorkflowStep) -> [String: String] {
@@ -2726,7 +2871,7 @@ final class TipTourEngine {
     }
 
     private func pointerActionMetadata(_ request: PointerActionRequest) -> [String: String] {
-        [
+        var metadata = [
             "goal": request.goal,
             "app": request.app ?? "unknown",
             "action_type": request.actionType.rawValue,
@@ -2737,6 +2882,10 @@ final class TipTourEngine {
             "allow_screenshot_planning": String(request.allowScreenshotPlanning),
             "validate_state_change": String(request.validateStateChange)
         ]
+        if let traceID = request.traceID {
+            metadata[TipTourActionTrace.metadataKey] = traceID
+        }
+        return metadata
     }
 
     private func targetMetadata(_ target: LocalPerceptionTargetCache.SnapshotTarget) -> [String: String] {
@@ -2780,6 +2929,7 @@ enum TipTourLongTaskStatus: String, Codable {
 
 struct TipTourLongTaskRunSnapshot: Encodable {
     let id: String
+    let traceID: String
     let title: String
     let prompt: String
     let app: String?
@@ -2794,6 +2944,24 @@ struct TipTourLongTaskRunSnapshot: Encodable {
     let failureMessage: String?
     let eventCount: Int
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case traceID = "trace_id"
+        case title
+        case prompt
+        case app
+        case status
+        case currentStepIndex
+        case completedStepCount
+        case totalSteps
+        case createdAt
+        case updatedAt
+        case completedAt
+        case failureReason
+        case failureMessage
+        case eventCount
+    }
+
     var isTerminal: Bool {
         status.isTerminal
     }
@@ -2802,6 +2970,7 @@ struct TipTourLongTaskRunSnapshot: Encodable {
 struct TipTourLongTaskEvent: Encodable {
     let id: Int
     let taskID: String
+    let traceID: String
     let type: String
     let timestamp: String
     let stepIndex: Int?
@@ -2811,6 +2980,21 @@ struct TipTourLongTaskEvent: Encodable {
     let actionLabel: String?
     let submission: TipTourEngineSubmissionResult?
     let workflowOutcome: TipTourEngineWorkflowOutcome?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case taskID
+        case traceID = "trace_id"
+        case type
+        case timestamp
+        case stepIndex
+        case totalSteps
+        case message
+        case actionType
+        case actionLabel
+        case submission
+        case workflowOutcome
+    }
 }
 
 struct TipTourLongTaskStartResponse: Encodable {
@@ -2879,7 +3063,8 @@ final class TipTourLongTaskCoordinator {
         title: String?,
         prompt: String,
         app: String?,
-        steps: [TipTourLongTaskStep]
+        steps: [TipTourLongTaskStep],
+        traceID: String?
     ) -> TipTourLongTaskStartResponse {
         if let activeTaskID,
            let activeRun = runs[activeTaskID],
@@ -2902,11 +3087,13 @@ final class TipTourLongTaskCoordinator {
         }
 
         let taskID = Self.makeTaskID()
+        let traceID = traceID ?? TipTourActionTrace.makeID(source: "task")
         let now = Date()
         let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let runTitle = trimmedTitle.flatMap { $0.isEmpty ? nil : $0 } ?? prompt
         let run = TipTourLongTaskRun(
             id: taskID,
+            traceID: traceID,
             title: runTitle,
             prompt: prompt,
             app: app,
@@ -3102,7 +3289,8 @@ final class TipTourLongTaskCoordinator {
                 WorkflowPlan(
                     goal: step.goal,
                     app: run.app,
-                    steps: [step.workflowStep]
+                    steps: [step.workflowStep],
+                    traceID: run.traceID
                 )
             )
 
@@ -3233,6 +3421,7 @@ final class TipTourLongTaskCoordinator {
         let event = TipTourLongTaskEvent(
             id: nextEventID,
             taskID: taskID,
+            traceID: run.traceID,
             type: type,
             timestamp: Self.iso8601Formatter.string(from: Date()),
             stepIndex: stepIndex,
@@ -3260,6 +3449,7 @@ final class TipTourLongTaskCoordinator {
             ),
             message: message,
             metadata: [
+                TipTourActionTrace.metadataKey: run.traceID,
                 "task_id": taskID,
                 "task_title": run.title,
                 "step_index": stepIndex.map(String.init) ?? "none",
@@ -3302,6 +3492,7 @@ final class TipTourLongTaskCoordinator {
     private func snapshot(for run: TipTourLongTaskRun) -> TipTourLongTaskRunSnapshot {
         TipTourLongTaskRunSnapshot(
             id: run.id,
+            traceID: run.traceID,
             title: run.title,
             prompt: run.prompt,
             app: run.app,
@@ -3331,6 +3522,7 @@ final class TipTourLongTaskCoordinator {
 
 private struct TipTourLongTaskRun {
     let id: String
+    let traceID: String
     let title: String
     let prompt: String
     let app: String?

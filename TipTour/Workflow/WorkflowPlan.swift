@@ -170,6 +170,43 @@ struct WorkflowPlan: Codable, Hashable {
 
     /// Ordered list of steps. The app executes them one at a time.
     let steps: [WorkflowStep]
+
+    /// Stable id for following one user/action request through planner,
+    /// grounding, execution, validation, and logs.
+    let traceID: String?
+
+    init(
+        goal: String,
+        app: String?,
+        steps: [WorkflowStep],
+        traceID: String? = nil
+    ) {
+        self.goal = goal
+        self.app = app
+        self.steps = steps
+        self.traceID = traceID
+    }
+
+    func withTraceID(_ traceID: String) -> WorkflowPlan {
+        WorkflowPlan(
+            goal: goal,
+            app: app,
+            steps: steps,
+            traceID: traceID
+        )
+    }
+}
+
+enum TipTourActionTrace {
+    static let metadataKey = "trace_id"
+
+    static func makeID(source: String) -> String {
+        let normalizedSource = source
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+        let prefix = normalizedSource.isEmpty ? "action" : String(normalizedSource.prefix(10))
+        return "\(prefix)_\(UUID().uuidString.prefix(8))"
+    }
 }
 
 // MARK: - Parsing
@@ -231,6 +268,8 @@ private struct FlexiblePlanPayload: Codable {
     let goal: String?
     let title: String?
     let app: String?
+    let traceID: String?
+    let trace_id: String?
     let steps: [FlexibleStep]?
     let plan: [FlexibleStep]?
 
@@ -293,7 +332,8 @@ private struct FlexiblePlanPayload: Codable {
         return WorkflowPlan(
             goal: goal ?? title ?? "Workflow",
             app: app,
-            steps: normalizedSteps
+            steps: normalizedSteps,
+            traceID: traceID ?? trace_id
         )
     }
 }

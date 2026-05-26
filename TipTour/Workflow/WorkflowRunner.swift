@@ -195,33 +195,37 @@ final class WorkflowRunner: ObservableObject {
         pointHandler: @escaping (ElementResolver.Resolution) -> Void,
         latestCapture: CompanionScreenCapture?
     ) {
-        guard !plan.steps.isEmpty else {
+        let traceID = plan.traceID ?? TipTourActionTrace.makeID(source: "workflow")
+        let tracedPlan = plan.withTraceID(traceID)
+
+        guard !tracedPlan.steps.isEmpty else {
             print("[Workflow] ignoring plan with no steps")
             recordWorkflowEvent(
                 name: "start",
                 status: "rejected",
                 message: "Ignoring plan with no steps.",
-                metadata: workflowPlanMetadata(plan)
+                metadata: workflowPlanMetadata(tracedPlan)
             )
             return
         }
 
         let singleActionPlan: WorkflowPlan
-        if plan.steps.count > 1 {
-            print("[Workflow] ✂️ single-action mode: clamping \"\(plan.goal)\" from \(plan.steps.count) steps to 1")
+        if tracedPlan.steps.count > 1 {
+            print("[Workflow] ✂️ single-action mode: clamping \"\(tracedPlan.goal)\" from \(tracedPlan.steps.count) steps to 1")
             recordWorkflowEvent(
                 name: "clamped",
                 status: "warning",
                 message: "WorkflowRunner accepts one action at a time.",
-                metadata: workflowPlanMetadata(plan)
+                metadata: workflowPlanMetadata(tracedPlan)
             )
             singleActionPlan = WorkflowPlan(
-                goal: plan.goal,
-                app: plan.app,
-                steps: Array(plan.steps.prefix(1))
+                goal: tracedPlan.goal,
+                app: tracedPlan.app,
+                steps: Array(tracedPlan.steps.prefix(1)),
+                traceID: traceID
             )
         } else {
-            singleActionPlan = plan
+            singleActionPlan = tracedPlan
         }
 
         activeStepResolutionTask?.cancel()
@@ -1517,11 +1521,15 @@ final class WorkflowRunner: ObservableObject {
     }
 
     private func workflowPlanMetadata(_ plan: WorkflowPlan) -> [String: String] {
-        [
+        var metadata = [
             "goal": plan.goal,
             "app": plan.app ?? "unknown",
             "step_count": String(plan.steps.count)
         ]
+        if let traceID = plan.traceID {
+            metadata[TipTourActionTrace.metadataKey] = traceID
+        }
+        return metadata
     }
 
     private func workflowStepMetadata(_ step: WorkflowStep) -> [String: String] {

@@ -18,6 +18,14 @@ TipTour listens only on localhost:
 http://127.0.0.1:19474
 ```
 
+Hermes and other agents should follow the canonical contract in
+[`docs/tiptour-agent-contract.md`](tiptour-agent-contract.md). The same
+contract is available from the running app:
+
+```bash
+curl http://127.0.0.1:19474/v1/agent-contract
+```
+
 ## Endpoints
 
 ### Health
@@ -34,9 +42,26 @@ Returns TipTour's current local state without sending screenshots anywhere.
 curl http://127.0.0.1:19474/v1/observe
 ```
 
+### Visual Context Broker
+
+Asks TipTour to decide whether the agent needs compact state, a target crop,
+or a full screenshot. This is the normal visual API for long-running agents.
+Use `/v1/screenshots` only for explicit raw screenshot debugging.
+
+```bash
+curl -X POST http://127.0.0.1:19474/v1/visual-context \
+  -H 'content-type: application/json' \
+  -d '{
+    "intent": "make a house in Blender",
+    "app": "Blender",
+    "visual_context": "auto",
+    "reason": "task_start"
+  }'
+```
+
 ### Local Grounding Targets
 
-Refreshes TipTour's on-device YOLO/OCR perception pass and returns real on-screen targets. External orchestrators should use this before choosing a click target instead of inventing raw coordinates.
+Refreshes TipTour's on-device YOLO/OCR perception pass and returns real on-screen targets. This endpoint is for debugging or full-graph inspection. In normal agent loops, prefer `/v1/ground-target` so TipTour returns one compact best match.
 
 ```bash
 curl http://127.0.0.1:19474/v1/targets

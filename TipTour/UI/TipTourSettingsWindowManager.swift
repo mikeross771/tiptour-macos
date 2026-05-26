@@ -149,6 +149,14 @@ struct PipelineLogEvent: Codable, Identifiable, Equatable {
         }
 
         appendSummaryLine(
+            title: "trace",
+            pairs: [
+                ("id", metadataValue(TipTourActionTrace.metadataKey, usedKeys: &usedKeys))
+            ],
+            to: &lines
+        )
+
+        appendSummaryLine(
             title: "task",
             pairs: [
                 ("goal", metadataValue("goal", usedKeys: &usedKeys)),
@@ -263,6 +271,7 @@ struct PipelineLogEvent: Codable, Identifiable, Equatable {
         "target_id",
         "target_label",
         "target_mark",
+        "trace_id",
         "target_pid",
         "value_preview",
         "x",

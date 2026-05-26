@@ -292,6 +292,7 @@ final class TipTourHarnessServer {
             response = jsonResponse([
                 "ok": true,
                 "tools": [
+                    "tiptour.agent_contract",
                     "tiptour.observe",
                     "tiptour.visual_context",
                     "tiptour.screenshots",
@@ -312,8 +313,12 @@ final class TipTourHarnessServer {
                 "local_tasks": true,
                 "task_planning": false,
                 "task_storage": "memory",
+                "trace_metadata": TipTourActionTrace.metadataKey,
                 "transport": "localhost-http"
             ])
+        case ("GET", "/v1/agent-contract"), ("GET", "/v1/agent_contract"):
+            activityReporter("Hermes reading TipTour agent contract")
+            response = encodableResponse(tipTourEngine.agentContract())
         case ("GET", "/v1/observe"):
             activityReporter("Hermes observing the desktop")
             response = encodableResponse(tipTourEngine.observe())
@@ -327,7 +332,8 @@ final class TipTourHarnessServer {
                 targetLabel: nil,
                 targetID: nil,
                 targetMark: nil,
-                refresh: false
+                refresh: false,
+                traceID: nil
             )
             response = encodableResponse(visualContext)
         case ("POST", "/v1/visual-context"), ("POST", "/v1/visual_context"), ("POST", "/v1/observation-snapshot"):
@@ -418,7 +424,8 @@ final class TipTourHarnessServer {
                 targetLabel: request.normalizedTargetLabel,
                 targetID: request.normalizedTargetID,
                 targetMark: request.normalizedTargetMark,
-                refresh: request.shouldRefreshTargets
+                refresh: request.shouldRefreshTargets,
+                traceID: request.normalizedTraceID
             )
             return encodableResponse(result)
         } catch {
@@ -575,7 +582,8 @@ final class TipTourHarnessServer {
                 title: request.title,
                 prompt: prompt,
                 app: request.app,
-                steps: request.longTaskSteps
+                steps: request.longTaskSteps,
+                traceID: request.normalizedTraceID
             )
             return encodableResponse(result)
         } catch {
@@ -727,6 +735,8 @@ private struct HarnessVisualContextRequest: Decodable {
     let refresh: Bool?
     let refreshTargets: Bool?
     let refresh_targets: Bool?
+    let traceID: String?
+    let trace_id: String?
 
     init() {
         self.intent = nil
@@ -748,6 +758,8 @@ private struct HarnessVisualContextRequest: Decodable {
         self.refresh = nil
         self.refreshTargets = nil
         self.refresh_targets = nil
+        self.traceID = nil
+        self.trace_id = nil
     }
 
     var normalizedIntent: String? {
@@ -778,6 +790,10 @@ private struct HarnessVisualContextRequest: Decodable {
         refreshTargets ?? refresh_targets ?? refresh ?? true
     }
 
+    var normalizedTraceID: String? {
+        firstNonEmpty(traceID, trace_id)
+    }
+
     private func firstNonEmpty(_ values: String?...) -> String? {
         values
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -805,6 +821,8 @@ private struct HarnessPlanNextActionRequest: Decodable {
     let includeTargets: Bool?
     let include_targets: Bool?
     let debug: Bool?
+    let traceID: String?
+    let trace_id: String?
 
     var pointerActionRequest: PointerActionRequest {
         PointerActionRequest(
@@ -816,7 +834,8 @@ private struct HarnessPlanNextActionRequest: Decodable {
             targetMark: targetMark ?? target_mark,
             execute: execute ?? true,
             allowScreenshotPlanning: allowScreenshotPlanning ?? allow_screenshot_planning ?? false,
-            validateStateChange: validateStateChange ?? validate_state_change ?? true
+            validateStateChange: validateStateChange ?? validate_state_change ?? true,
+            traceID: traceID ?? trace_id
         )
     }
 
@@ -827,6 +846,7 @@ private struct HarnessPlanNextActionRequest: Decodable {
 
 private struct HarnessCompactPlanNextActionResponse: Encodable {
     let ok: Bool
+    let traceID: String
     let reason: String?
     let message: String?
     let activeApp: String?
@@ -838,8 +858,24 @@ private struct HarnessCompactPlanNextActionResponse: Encodable {
     let repaired: Bool
     let targetCount: Int
 
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case traceID = "trace_id"
+        case reason
+        case message
+        case activeApp
+        case plannedStep
+        case submission
+        case workflowOutcome
+        case validation
+        case attempts
+        case repaired
+        case targetCount
+    }
+
     init(_ result: TipTourEnginePlanNextActionResult) {
         self.ok = result.ok
+        self.traceID = result.traceID
         self.reason = result.reason
         self.message = result.message
         self.activeApp = result.activeApp
@@ -929,6 +965,8 @@ private struct HarnessGroundTargetRequest: Decodable {
 private struct HarnessWorkflowPlanRequest: Decodable {
     let goal: String
     let app: String?
+    let traceID: String?
+    let trace_id: String?
     let steps: [HarnessWorkflowStepRequest]
 
     func toWorkflowPlan() -> WorkflowPlan {
@@ -937,7 +975,8 @@ private struct HarnessWorkflowPlanRequest: Decodable {
             app: app,
             steps: steps.enumerated().map { index, step in
                 step.toWorkflowStep(index: index)
-            }
+            },
+            traceID: traceID ?? trace_id
         )
     }
 }
@@ -949,6 +988,8 @@ private struct HarnessLongTaskStartRequest: Decodable {
     let task: String?
     let app: String?
     let steps: [HarnessWorkflowStepRequest]?
+    let traceID: String?
+    let trace_id: String?
 
     var normalizedPrompt: String? {
         let candidate = prompt ?? goal ?? task ?? title
@@ -964,6 +1005,12 @@ private struct HarnessLongTaskStartRequest: Decodable {
                 defaultGoal: taskGoal
             )
         }
+    }
+
+    var normalizedTraceID: String? {
+        let candidate = traceID ?? trace_id
+        let trimmedCandidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedCandidate.isEmpty ? nil : trimmedCandidate
     }
 }
 

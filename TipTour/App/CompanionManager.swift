@@ -550,12 +550,14 @@ final class CompanionManager: ObservableObject {
     /// raw tool args into a WorkflowPlan and kicks off the runner.
     @MainActor
     private func handleToolSubmitWorkflowPlan(id: String, goal: String, app: String, steps: [[String: Any]]) async -> [String: Any] {
+        let traceID = TipTourActionTrace.makeID(source: "voice")
         PipelineLogStore.shared.record(
             category: "voice_tool",
             name: "submit_workflow_plan",
             status: "received",
             message: goal,
             metadata: [
+                TipTourActionTrace.metadataKey: traceID,
                 "tool_call_id": id,
                 "app": app,
                 "step_count": String(steps.count)
@@ -568,7 +570,10 @@ final class CompanionManager: ObservableObject {
                 name: "submit_workflow_plan",
                 status: "rejected",
                 message: rejection["reason"] as? String,
-                metadata: ["tool_call_id": id]
+                metadata: [
+                    TipTourActionTrace.metadataKey: traceID,
+                    "tool_call_id": id
+                ]
             )
             return rejection
         }
@@ -583,6 +588,7 @@ final class CompanionManager: ObservableObject {
                     status: "rejected",
                     message: "Same goal already running.",
                     metadata: [
+                        TipTourActionTrace.metadataKey: traceID,
                         "tool_call_id": id,
                         "reason": "plan_already_running",
                         "active_goal": activePlan.goal
@@ -600,7 +606,10 @@ final class CompanionManager: ObservableObject {
                 name: "supersede_active_plan",
                 status: "warning",
                 message: goal,
-                metadata: ["previous_goal": activePlan.goal]
+                metadata: [
+                    TipTourActionTrace.metadataKey: traceID,
+                    "previous_goal": activePlan.goal
+                ]
             )
             WorkflowRunner.shared.stop()
         }
@@ -666,7 +675,11 @@ final class CompanionManager: ObservableObject {
                 name: "submit_workflow_plan",
                 status: "rejected",
                 message: "No workflow steps were provided.",
-                metadata: ["tool_call_id": id, "reason": "empty_steps"]
+                metadata: [
+                    TipTourActionTrace.metadataKey: traceID,
+                    "tool_call_id": id,
+                    "reason": "empty_steps"
+                ]
             )
             return ["ok": false, "reason": "empty_steps"]
         }
@@ -679,7 +692,11 @@ final class CompanionManager: ObservableObject {
                 name: "submit_workflow_plan",
                 status: "rejected",
                 message: "Autopilot is off.",
-                metadata: ["tool_call_id": id, "reason": "autopilot_disabled"]
+                metadata: [
+                    TipTourActionTrace.metadataKey: traceID,
+                    "tool_call_id": id,
+                    "reason": "autopilot_disabled"
+                ]
             )
             return [
                 "ok": false,
@@ -696,7 +713,8 @@ final class CompanionManager: ObservableObject {
         let plan = WorkflowPlan(
             goal: goal,
             app: app.isEmpty ? nil : app,
-            steps: parsedSteps
+            steps: parsedSteps,
+            traceID: traceID
         )
         let stepLabels = parsedSteps.map { $0.label ?? "<unlabeled>" }
         print("[Tool] ✓ submit_workflow_plan → \(plan.app ?? "?"): \(stepLabels)")
@@ -706,6 +724,7 @@ final class CompanionManager: ObservableObject {
             status: "accepted",
             message: goal,
             metadata: [
+                TipTourActionTrace.metadataKey: traceID,
                 "tool_call_id": id,
                 "app": plan.app ?? "",
                 "accepted_steps": String(stepLabels.count),
@@ -2785,6 +2804,7 @@ final class CompanionManager: ObservableObject {
         prompt: String,
         sourceLabel: String
     ) async throws -> TipTourEngineSubmissionResult {
+        let longTaskTraceID = TipTourActionTrace.makeID(source: "hermes")
         let shouldReportTextCommandActivity = sourceLabel == "TextCommand"
         if shouldReportTextCommandActivity {
             isTextCommandHermesWorkflowActive = true
@@ -2795,7 +2815,10 @@ final class CompanionManager: ObservableObject {
             name: "start",
             status: "received",
             message: prompt,
-            metadata: ["source": sourceLabel]
+            metadata: [
+                TipTourActionTrace.metadataKey: longTaskTraceID,
+                "source": sourceLabel
+            ]
         )
         defer {
             if shouldReportTextCommandActivity {
@@ -2803,32 +2826,30 @@ final class CompanionManager: ObservableObject {
             }
         }
 
-        let captures: [CompanionScreenCapture]
-        if isScreenshotStreamingEnabled {
-            if shouldReportTextCommandActivity {
-                textCommandActivityText = "Capturing screens for Hermes"
-            }
-            print("[\(sourceLabel)] capturing screenshots for Hermes")
-            captures = (try? await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()) ?? []
-        } else {
-            captures = []
+        if shouldReportTextCommandActivity {
+            textCommandActivityText = "Preparing visual context policy"
         }
-        print("[\(sourceLabel)] Hermes captures=\(captures.count)")
+        let captures: [CompanionScreenCapture] = []
+        print("[\(sourceLabel)] Hermes initial raw captures suppressed; use /v1/visual-context")
         PipelineLogStore.shared.record(
             category: "hermes",
-            name: "captures",
+            name: "visual_context_policy",
             status: "ok",
             metadata: [
+                TipTourActionTrace.metadataKey: longTaskTraceID,
                 "source": sourceLabel,
                 "capture_count": String(captures.count),
-                "screenshots_enabled": String(isScreenshotStreamingEnabled)
+                "screenshots_enabled": String(isScreenshotStreamingEnabled),
+                "raw_initial_captures": "suppressed",
+                "normal_visual_api": "/v1/visual-context"
             ]
         )
 
         let hermesPrompt = hermesPromptWithTipTourContext(
             prompt,
             sourceLabel: sourceLabel,
-            captures: captures
+            captures: captures,
+            traceID: longTaskTraceID
         )
         let result = try await hermesAgentClient.streamPrompt(
             hermesPrompt,
@@ -2853,7 +2874,10 @@ final class CompanionManager: ObservableObject {
                         name: "tool_progress",
                         status: "info",
                         message: progressText,
-                        metadata: ["source": sourceLabel]
+                        metadata: [
+                            TipTourActionTrace.metadataKey: longTaskTraceID,
+                            "source": sourceLabel
+                        ]
                     )
                     if sourceLabel == "TextCommand" {
                         self.textCommandActivityText = statusText
@@ -2871,7 +2895,10 @@ final class CompanionManager: ObservableObject {
                         name: "status",
                         status: "info",
                         message: statusText,
-                        metadata: ["source": sourceLabel]
+                        metadata: [
+                            TipTourActionTrace.metadataKey: longTaskTraceID,
+                            "source": sourceLabel
+                        ]
                     )
                 }
             }
@@ -2893,6 +2920,7 @@ final class CompanionManager: ObservableObject {
             status: "ok",
             message: finalText.isEmpty ? "Hermes completed without a text response." : compactStatusText(finalText),
             metadata: [
+                TipTourActionTrace.metadataKey: longTaskTraceID,
                 "source": sourceLabel,
                 "session_id": hermesSessionID ?? ""
             ]
@@ -2902,6 +2930,7 @@ final class CompanionManager: ObservableObject {
             ok: true,
             reason: nil,
             message: finalText.isEmpty ? "Hermes completed without a text response." : finalText,
+            traceID: longTaskTraceID,
             acceptedSteps: 0,
             ignoredSteps: 0,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -2911,7 +2940,8 @@ final class CompanionManager: ObservableObject {
     private func hermesPromptWithTipTourContext(
         _ prompt: String,
         sourceLabel: String,
-        captures: [CompanionScreenCapture] = []
+        captures: [CompanionScreenCapture] = [],
+        traceID: String
     ) -> String {
         let frontmostApplication = NSWorkspace.shared.frontmostApplication
         let activeApp = frontmostApplication?.localizedName ?? "unknown"
@@ -2932,9 +2962,12 @@ final class CompanionManager: ObservableObject {
         TipTour Autopilot: \(isAutopilotEnabled ? "enabled" : "disabled")
         TipTour Accurate Grounding: \(groundingMode)
         TipTour screenshot streaming setting: \(screenshotMode)
-        Fresh screenshots attached to this Hermes turn: \(captures.isEmpty ? "none" : "\n\(screenshotSummary)")
-        During long tasks, ask TipTour to broker visual context with POST http://127.0.0.1:19474/v1/visual-context using visual_context="auto". TipTour will decide whether compact state, a target crop, or a fresh full screenshot is worth sending. When you need visual context for a specific control or object, include query/target_label so TipTour can prefer target_crop. Use /v1/screenshots only for explicit raw screenshot debugging.
-        TipTour can run explicit multi-step workflows through POST http://127.0.0.1:19474/v1/tasks when you already have a concrete step list; otherwise keep planning one action at a time.
+        Current TipTour long-task trace_id: \(traceID)
+        Pass this exact trace_id in every TipTour harness request body during this user task, including /v1/visual-context, /v1/ground-target, /v1/act, /v1/workflow-plan, and /v1/tasks.
+        Fresh raw screenshots attached to this Hermes turn: \(captures.isEmpty ? "none" : "\n\(screenshotSummary)")
+        This is intentional: during long tasks, ask TipTour to broker visual context with POST http://127.0.0.1:19474/v1/visual-context using visual_context="auto". TipTour will decide whether compact state, a target crop, or a fresh full screenshot is worth sending. When you need visual context for a specific control or object, include query/target_label so TipTour can prefer target_crop. Use /v1/screenshots only for explicit raw screenshot debugging.
+        Canonical agent contract: GET http://127.0.0.1:19474/v1/agent-contract
+        TipTour can run explicit deterministic mini-sequences through POST http://127.0.0.1:19474/v1/tasks when you already have a concrete step list, such as Blender modal transforms S, Z, type value, Return. Do not send multiple steps to /v1/workflow-plan.
         \(activeAppSkillInstructions)
         Current TipTour focus highlight:
         \(currentFocusHighlightContext)
