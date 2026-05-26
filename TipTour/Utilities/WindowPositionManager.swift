@@ -8,6 +8,7 @@
 
 import AppKit
 import ApplicationServices
+import Combine
 import ScreenCaptureKit
 
 enum PermissionRequestPresentationDestination: Equatable {

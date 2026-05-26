@@ -197,12 +197,24 @@ final class WorkflowRunner: ObservableObject {
     ) {
         guard !plan.steps.isEmpty else {
             print("[Workflow] ignoring plan with no steps")
+            recordWorkflowEvent(
+                name: "start",
+                status: "rejected",
+                message: "Ignoring plan with no steps.",
+                metadata: workflowPlanMetadata(plan)
+            )
             return
         }
 
         let singleActionPlan: WorkflowPlan
         if plan.steps.count > 1 {
             print("[Workflow] ✂️ single-action mode: clamping \"\(plan.goal)\" from \(plan.steps.count) steps to 1")
+            recordWorkflowEvent(
+                name: "clamped",
+                status: "warning",
+                message: "WorkflowRunner accepts one action at a time.",
+                metadata: workflowPlanMetadata(plan)
+            )
             singleActionPlan = WorkflowPlan(
                 goal: plan.goal,
                 app: plan.app,
@@ -227,6 +239,17 @@ final class WorkflowRunner: ObservableObject {
         planTargetAppBundleID = Self.bundleIDForAppName(singleActionPlan.app)
         startObservingAppActivationsForCurrentPlan()
         print("[Workflow] starting \"\(singleActionPlan.goal)\" — \(singleActionPlan.steps.count) step(s) — token=\(freshOperationToken.uuidString.prefix(8))")
+        recordWorkflowEvent(
+            name: "start",
+            status: "started",
+            metadata: workflowPlanMetadata(singleActionPlan).merging(
+                [
+                    "operation_token": String(freshOperationToken.uuidString.prefix(8)),
+                    "latest_capture": latestCapture == nil ? "none" : "provided"
+                ],
+                uniquingKeysWith: { existing, _ in existing }
+            )
+        )
 
         // For step 1 the incoming `latestCapture` can be several seconds
         // stale (Gemini Live's periodic screenshot timer stops when we
@@ -263,6 +286,7 @@ final class WorkflowRunner: ObservableObject {
             pausedReason = nil
             return
         }
+        let stoppedPlan = activePlan
         activePlan = nil
         activeStepIndex = 0
         isResolvingCurrentStep = false
@@ -275,6 +299,13 @@ final class WorkflowRunner: ObservableObject {
         planTargetAppBundleID = nil
         ClickDetector.shared.disarm()
         print("[Workflow] stopped")
+        if let stoppedPlan {
+            recordWorkflowEvent(
+                name: "stop",
+                status: "ok",
+                metadata: workflowPlanMetadata(stoppedPlan)
+            )
+        }
     }
 
     // MARK: - Pause / Resume
@@ -288,6 +319,12 @@ final class WorkflowRunner: ObservableObject {
         if pausedReason == reason { return }
         print("[Workflow] paused — \(reason.humanReadable)")
         pausedReason = reason
+        recordWorkflowEvent(
+            name: "paused",
+            status: "paused",
+            message: reason.humanReadable,
+            metadata: activeWorkflowMetadata()
+        )
         ClickDetector.shared.disarm()
         activeStepResolutionTask?.cancel()
         activeStepResolutionTask = nil
@@ -301,6 +338,11 @@ final class WorkflowRunner: ObservableObject {
         guard activePlan != nil, pausedReason != nil else { return }
         guard let token = currentOperationToken else { return }
         print("[Workflow] user resumed paused plan")
+        recordWorkflowEvent(
+            name: "resume",
+            status: "started",
+            metadata: activeWorkflowMetadata()
+        )
         pausedReason = nil
         currentStepResolutionFailureLabel = nil
         activeStepResolutionTask?.cancel()
@@ -332,6 +374,11 @@ final class WorkflowRunner: ObservableObject {
     /// identically to a successful advance so the runner keeps flowing.
     func skipCurrentStep() {
         print("[Workflow] user skipped step \(activeStepIndex + 1)")
+        recordWorkflowEvent(
+            name: "skip_step",
+            status: "warning",
+            metadata: activeWorkflowMetadata()
+        )
         currentStepResolutionFailureLabel = nil
         pausedReason = nil
         advanceUsingCachedHandlers(isPostClick: false)
@@ -343,6 +390,11 @@ final class WorkflowRunner: ObservableObject {
     func retryCurrentStep() {
         guard let token = currentOperationToken else { return }
         print("[Workflow] user retrying step \(activeStepIndex + 1)")
+        recordWorkflowEvent(
+            name: "retry_step",
+            status: "started",
+            metadata: activeWorkflowMetadata()
+        )
         currentStepResolutionFailureLabel = nil
         pausedReason = nil
         activeStepResolutionTask?.cancel()
@@ -459,6 +511,14 @@ final class WorkflowRunner: ObservableObject {
 
         guard activeStepIndex + 1 < plan.steps.count else {
             print("[Workflow] plan complete")
+            recordWorkflowEvent(
+                name: "complete",
+                status: "completed",
+                metadata: workflowPlanMetadata(plan).merging(
+                    ["completed_step_index": String(activeStepIndex + 1)],
+                    uniquingKeysWith: { existing, _ in existing }
+                )
+            )
             stop()
             return
         }
@@ -497,6 +557,17 @@ final class WorkflowRunner: ObservableObject {
         }
 
         let freshCaptures = await Self.captureAllScreens()
+        recordWorkflowEvent(
+            name: "capture_for_resolution",
+            status: freshCaptures.isEmpty ? "warning" : "ok",
+            metadata: activeWorkflowMetadata().merging(
+                [
+                    "capture_count": String(freshCaptures.count),
+                    "is_post_click": String(isPostClick)
+                ],
+                uniquingKeysWith: { existing, _ in existing }
+            )
+        )
         if let pickedCapture = freshCaptures.first(where: { $0.isCursorScreen }) ?? freshCaptures.first {
             latestCaptureForActivePlan = pickedCapture
         }
@@ -510,6 +581,12 @@ final class WorkflowRunner: ObservableObject {
            let targetAppHint = activePlan?.app,
            let modalTitle = Self.detectBlockingModalDialogTitle(targetAppHint: targetAppHint) {
             print("[Workflow] modal dialog detected mid-workflow: \"\(modalTitle ?? "")\" — pausing")
+            recordWorkflowEvent(
+                name: "modal_detected",
+                status: "paused",
+                message: modalTitle,
+                metadata: activeWorkflowMetadata()
+            )
             pause(.modalDialogPresented(title: modalTitle))
             return
         }
@@ -522,6 +599,15 @@ final class WorkflowRunner: ObservableObject {
         case .click, .rightClick, .doubleClick:
             guard let label = step.label, !label.isEmpty else {
                 print("[Workflow] step \"\(step.hint)\" has no label — skipping")
+                recordWorkflowEvent(
+                    name: "step_missing_label",
+                    status: "warning",
+                    message: step.hint,
+                    metadata: workflowStepMetadata(step).merging(
+                        activeWorkflowMetadata(),
+                        uniquingKeysWith: { existing, _ in existing }
+                    )
+                )
                 advanceUsingCachedHandlers(isPostClick: false)
                 return
             }
@@ -617,6 +703,14 @@ final class WorkflowRunner: ObservableObject {
             targetMark: activeStep?.targetMark,
             fallbackLabel: label
         ) {
+            recordWorkflowEvent(
+                name: "resolved",
+                status: "ok",
+                metadata: activeWorkflowMetadata().merging(
+                    resolutionMetadata(exactLocalResolution),
+                    uniquingKeysWith: { existing, _ in existing }
+                )
+            )
             armCursorAndClickDetector(
                 with: exactLocalResolution,
                 pickingFrom: latestAllCaptures,
@@ -647,6 +741,17 @@ final class WorkflowRunner: ObservableObject {
                 ) {
                     if Task.isCancelled { return }
                     if operationToken != currentOperationToken { return }
+                    recordWorkflowEvent(
+                        name: "resolved",
+                        status: "ok",
+                        metadata: activeWorkflowMetadata().merging(
+                            resolutionMetadata(axResolution).merging(
+                                ["attempt": String(attemptIndex)],
+                                uniquingKeysWith: { existing, _ in existing }
+                            ),
+                            uniquingKeysWith: { existing, _ in existing }
+                        )
+                    )
                     armCursorAndClickDetector(
                         with: axResolution,
                         pickingFrom: latestAllCaptures,
@@ -674,8 +779,74 @@ final class WorkflowRunner: ObservableObject {
                ) {
                 if Task.isCancelled { return }
                 if operationToken != currentOperationToken { return }
+                var finalResolution = resolution
+                let llmHintForCapture = activeStep?.hintCoordinate(in: capture)
+                if let rejectionReason = canvasVisualObjectTextMatchRejectionReason(
+                    resolution: resolution,
+                    step: activeStep,
+                    plan: activePlan
+                ) {
+                    if let llmHintForCapture {
+                        let rawLLMResolution = ElementResolver.shared.rawLLMCoordinate(
+                            label: label,
+                            llmHintInScreenshotPixels: llmHintForCapture,
+                            capture: capture
+                        )
+                        recordWorkflowEvent(
+                            name: "resolution_fallback",
+                            status: "warning",
+                            message: rejectionReason,
+                            metadata: activeWorkflowMetadata().merging(
+                                resolutionMetadata(resolution).merging(
+                                    [
+                                        "attempt": String(attemptIndex),
+                                        "capture_label": capture.label,
+                                        "fallback_source": "llm_raw_coordinates",
+                                        "reason": rejectionReason
+                                    ],
+                                    uniquingKeysWith: { existing, _ in existing }
+                                ),
+                                uniquingKeysWith: { existing, _ in existing }
+                            )
+                        )
+                        finalResolution = rawLLMResolution
+                    } else {
+                        recordWorkflowEvent(
+                            name: "resolve_failed",
+                            status: "failed",
+                            message: "Canvas object needs point_2d or box_2d.",
+                            metadata: activeWorkflowMetadata().merging(
+                                resolutionMetadata(resolution).merging(
+                                    [
+                                        "attempt": String(attemptIndex),
+                                        "capture_label": capture.label,
+                                        "reason": rejectionReason
+                                    ],
+                                    uniquingKeysWith: { existing, _ in existing }
+                                ),
+                                uniquingKeysWith: { existing, _ in existing }
+                            )
+                        )
+                        currentStepResolutionFailureLabel = label
+                        return
+                    }
+                }
+                recordWorkflowEvent(
+                    name: "resolved",
+                    status: "ok",
+                    metadata: activeWorkflowMetadata().merging(
+                        resolutionMetadata(finalResolution).merging(
+                            [
+                                "attempt": String(attemptIndex),
+                                "capture_label": capture.label
+                            ],
+                            uniquingKeysWith: { existing, _ in existing }
+                        ),
+                        uniquingKeysWith: { existing, _ in existing }
+                    )
+                )
                 armCursorAndClickDetector(
-                    with: resolution,
+                    with: finalResolution,
                     pickingFrom: latestAllCaptures,
                     stepType: activeStep?.type ?? .click,
                     operationToken: operationToken
@@ -693,6 +864,18 @@ final class WorkflowRunner: ObservableObject {
         // the user to skip or retry instead of stalling silently.
         guard operationToken == currentOperationToken else { return }
         print("[Workflow] ✗ step \(activeStepIndex + 1) \"\(label)\" did not resolve within \(stepResolutionTimeoutSeconds)s (\(attemptIndex) attempts)")
+        recordWorkflowEvent(
+            name: "resolve_failed",
+            status: "failed",
+            message: label,
+            metadata: activeWorkflowMetadata().merging(
+                [
+                    "attempt_count": String(attemptIndex),
+                    "timeout_seconds": String(format: "%.1f", stepResolutionTimeoutSeconds)
+                ],
+                uniquingKeysWith: { existing, _ in existing }
+            )
+        )
         currentStepResolutionFailureLabel = label
     }
 
@@ -1298,6 +1481,204 @@ final class WorkflowRunner: ObservableObject {
             }
         }
         return nil
+    }
+
+    private func recordWorkflowEvent(
+        name: String,
+        status: String,
+        message: String? = nil,
+        metadata: [String: String] = [:]
+    ) {
+        PipelineLogStore.shared.record(
+            category: "workflow",
+            name: name,
+            status: status,
+            message: message,
+            metadata: metadata
+        )
+    }
+
+    private func activeWorkflowMetadata() -> [String: String] {
+        var metadata: [String: String] = [
+            "active_step_index": String(activeStepIndex + 1),
+            "paused": String(pausedReason != nil),
+            "resolving": String(isResolvingCurrentStep)
+        ]
+        if let activePlan {
+            metadata.merge(workflowPlanMetadata(activePlan), uniquingKeysWith: { existing, _ in existing })
+        }
+        if let activeStep {
+            metadata.merge(workflowStepMetadata(activeStep), uniquingKeysWith: { existing, _ in existing })
+        }
+        if let currentOperationToken {
+            metadata["operation_token"] = String(currentOperationToken.uuidString.prefix(8))
+        }
+        return metadata
+    }
+
+    private func workflowPlanMetadata(_ plan: WorkflowPlan) -> [String: String] {
+        [
+            "goal": plan.goal,
+            "app": plan.app ?? "unknown",
+            "step_count": String(plan.steps.count)
+        ]
+    }
+
+    private func workflowStepMetadata(_ step: WorkflowStep) -> [String: String] {
+        var metadata: [String: String] = [
+            "step_id": step.id,
+            "action_type": step.type.rawValue,
+            "label": step.label ?? "none",
+            "value_preview": step.value.map { String($0.prefix(80)) } ?? "none",
+            "target_id": step.targetID ?? "none",
+            "target_mark": step.targetMark.map(String.init) ?? "none",
+            "hint": step.hint
+        ]
+        if let box = step.box2DNormalized {
+            metadata["box_2d"] = box.map(String.init).joined(separator: ",")
+        }
+        if let hintCoordinate = step.hintCoordinate {
+            metadata["hint_pixel"] = [
+                String(format: "%.1f", hintCoordinate.x),
+                String(format: "%.1f", hintCoordinate.y)
+            ].joined(separator: ",")
+        }
+        return metadata
+    }
+
+    private func canvasVisualObjectTextMatchRejectionReason(
+        resolution: ElementResolver.Resolution,
+        step: WorkflowStep?,
+        plan: WorkflowPlan?
+    ) -> String? {
+        guard let step,
+              step.type == .observe,
+              isCanvasLikeApp(plan?.app) else {
+            return nil
+        }
+
+        switch resolution.source {
+        case .localPerceptionCache, .nativeDetectorCache:
+            break
+        default:
+            return nil
+        }
+
+        let contextText = [
+            plan?.goal,
+            step.label,
+            step.hint
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+
+        guard mentionsCanvasVisualObject(contextText),
+              !mentionsMenuOrControlContext(contextText) else {
+            return nil
+        }
+
+        guard let rect = resolution.globalScreenRect else {
+            return (step.hintCoordinate != nil || step.box2DNormalized != nil)
+                ? "canvas_visual_object_prefers_llm_coordinates"
+                : "canvas_visual_object_needs_point_2d_or_box_2d"
+        }
+
+        let width = abs(rect.width)
+        let height = abs(rect.height)
+        let aspectRatio = width / max(height, 1)
+        let looksLikeTextOrMenuLabel = height <= 80 && aspectRatio >= 3.5
+        guard looksLikeTextOrMenuLabel else {
+            return nil
+        }
+
+        return (step.hintCoordinate != nil || step.box2DNormalized != nil)
+            ? "canvas_visual_object_prefers_llm_coordinates"
+            : "canvas_visual_object_needs_point_2d_or_box_2d"
+    }
+
+    private func isCanvasLikeApp(_ appName: String?) -> Bool {
+        guard let appName = appName?.lowercased() else { return false }
+        return appName.contains("blender")
+            || appName.contains("figma")
+            || appName.contains("photoshop")
+            || appName.contains("illustrator")
+            || appName.contains("unity")
+            || appName.contains("unreal")
+    }
+
+    private func mentionsCanvasVisualObject(_ text: String) -> Bool {
+        let visualObjectTerms = [
+            "3d",
+            "canvas",
+            "cone",
+            "cube",
+            "cylinder",
+            "geometry",
+            "house",
+            "mesh",
+            "model",
+            "object",
+            "shape",
+            "sphere",
+            "torus"
+        ]
+        return visualObjectTerms.contains { text.contains($0) }
+    }
+
+    private func mentionsMenuOrControlContext(_ text: String) -> Bool {
+        let controlTerms = [
+            "button",
+            "control",
+            "field",
+            "item",
+            "menu",
+            "option",
+            "panel",
+            "submenu",
+            "tab",
+            "toolbar"
+        ]
+        return controlTerms.contains { text.contains($0) }
+    }
+
+    private func resolutionMetadata(_ resolution: ElementResolver.Resolution) -> [String: String] {
+        var metadata: [String: String] = [
+            "resolved_label": resolution.label,
+            "resolution_source": resolutionSourceName(resolution.source),
+            "resolved_x": String(format: "%.1f", resolution.globalScreenPoint.x),
+            "resolved_y": String(format: "%.1f", resolution.globalScreenPoint.y),
+            "display_frame": [
+                resolution.displayFrame.minX,
+                resolution.displayFrame.minY,
+                resolution.displayFrame.maxX,
+                resolution.displayFrame.maxY
+            ].map { String(format: "%.1f", $0) }.joined(separator: ",")
+        ]
+        if let rect = resolution.globalScreenRect {
+            metadata["resolved_rect"] = [
+                rect.minX,
+                rect.minY,
+                rect.maxX,
+                rect.maxY
+            ].map { String(format: "%.1f", $0) }.joined(separator: ",")
+        }
+        return metadata
+    }
+
+    private func resolutionSourceName(_ source: ElementResolver.ResolutionSource) -> String {
+        switch source {
+        case .accessibilityTree:
+            return "accessibility_tree"
+        case .browserDOMCoordinates:
+            return "browser_dom"
+        case .nativeDetectorCache:
+            return "native_detector"
+        case .localPerceptionCache:
+            return "local_perception"
+        case .llmRawCoordinates:
+            return "llm_raw_coordinates"
+        }
     }
 
     /// Grab a capture of every connected display. Returns an empty array

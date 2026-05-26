@@ -5,8 +5,6 @@ struct TipTourSettingsView: View {
     @ObservedObject var companionManager: CompanionManager
     @State private var selectedSection: SettingsSection = .voice
     @State private var hermesServerURLInput: String = TipTourDefaults.hermesAPIBaseURL
-    @State private var nanoClawServerURLInput: String = TipTourDefaults.nanoClawAPIBaseURL
-    @State private var nanoClawCLIInput: String = TipTourDefaults.nanoClawCLIExecutablePath
     private let sidebarWidth: CGFloat = 178
     private let contentMaxWidth: CGFloat = 620
 
@@ -35,8 +33,6 @@ struct TipTourSettingsView: View {
         .background(DS.Colors.background)
         .onAppear {
             hermesServerURLInput = companionManager.hermesAPIBaseURL
-            nanoClawServerURLInput = companionManager.nanoClawAPIBaseURL
-            nanoClawCLIInput = companionManager.nanoClawCLIExecutablePath
         }
     }
 
@@ -166,20 +162,6 @@ struct TipTourSettingsView: View {
             )
 
             hermesConnectionCard
-
-            settingsRow(
-                title: "NanoClaw Auto",
-                subtitle: companionManager.isNanoClawOrchestratorEnabled
-                    ? "Long Ctrl+K tasks can route to NanoClaw."
-                    : "NanoClaw stays idle; Hermes or Claude can handle planning.",
-                systemImage: "shippingbox",
-                isOn: Binding(
-                    get: { companionManager.isNanoClawOrchestratorEnabled },
-                    set: { companionManager.setNanoClawOrchestratorEnabled($0) }
-                )
-            )
-
-            nanoClawConnectionCard
         }
     }
 
@@ -249,100 +231,6 @@ struct TipTourSettingsView: View {
             }
 
             if let installPath = companionManager.hermesConnectionStatus.detectedInstallPath {
-                Text(installPath)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(DS.Colors.textTertiary.opacity(0.85))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.leading, 34)
-            }
-        }
-        .padding(.vertical, 8)
-    }
-
-    private var nanoClawConnectionCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                rowIcon("network")
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("NanoClaw Connection")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(DS.Colors.textSecondary)
-                    Text(companionManager.nanoClawConnectionDetail)
-                        .font(.system(size: 11))
-                        .foregroundColor(DS.Colors.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-//                .frame(maxWidth: .infinity, alignment: .leading)
-
-                statusBadge(companionManager.nanoClawConnectionState)
-            }
-
-            TextField("http://127.0.0.1:10961", text: $nanoClawServerURLInput)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundColor(DS.Colors.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(fieldBackground)
-                .padding(.leading, 34)
-                .onSubmit {
-                    companionManager.setNanoClawAPIBaseURL(nanoClawServerURLInput)
-                    nanoClawServerURLInput = companionManager.nanoClawAPIBaseURL
-                }
-
-            TextField("claw", text: $nanoClawCLIInput)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundColor(DS.Colors.textSecondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(fieldBackground)
-                .padding(.leading, 34)
-                .onSubmit {
-                    companionManager.setNanoClawCLIExecutablePath(nanoClawCLIInput)
-                    nanoClawCLIInput = companionManager.nanoClawCLIExecutablePath
-                }
-
-            HStack(spacing: 8) {
-                Spacer(minLength: 34)
-
-                Button("Detect") {
-                    companionManager.setNanoClawAPIBaseURL(nanoClawServerURLInput)
-                    companionManager.setNanoClawCLIExecutablePath(nanoClawCLIInput)
-                    Task {
-                        await companionManager.detectNanoClawConnection()
-                        await MainActor.run {
-                            nanoClawServerURLInput = companionManager.nanoClawAPIBaseURL
-                            nanoClawCLIInput = companionManager.nanoClawCLIExecutablePath
-                        }
-                    }
-                }
-                .controlSize(.small)
-                .font(.system(size: 11, weight: .medium))
-                .buttonStyle(.bordered)
-                .pointerCursor()
-
-                Button("Test") {
-                    companionManager.setNanoClawAPIBaseURL(nanoClawServerURLInput)
-                    companionManager.setNanoClawCLIExecutablePath(nanoClawCLIInput)
-                    Task {
-                        await companionManager.testNanoClawConnection()
-                        await MainActor.run {
-                            nanoClawServerURLInput = companionManager.nanoClawAPIBaseURL
-                            nanoClawCLIInput = companionManager.nanoClawCLIExecutablePath
-                        }
-                    }
-                }
-                .controlSize(.small)
-                .font(.system(size: 11, weight: .medium))
-                .buttonStyle(.borderedProminent)
-                .tint(DS.Colors.accent)
-                .pointerCursor()
-            }
-
-            if let installPath = companionManager.nanoClawDetectedInstallPath {
                 Text(installPath)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(DS.Colors.textTertiary.opacity(0.85))

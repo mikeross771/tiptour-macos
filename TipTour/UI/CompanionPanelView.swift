@@ -228,11 +228,7 @@ struct CompanionPanelView: View {
                     isActive: isLongTaskRouterEnabled,
                     helpText: "Toggle long-task routing"
                 ) {
-                    if companionManager.isNanoClawOrchestratorEnabled {
-                        companionManager.setNanoClawOrchestratorEnabled(false)
-                    } else {
-                        companionManager.setHermesOrchestratorEnabled(!companionManager.isHermesOrchestratorEnabled)
-                    }
+                    companionManager.setHermesOrchestratorEnabled(!companionManager.isHermesOrchestratorEnabled)
                 }
             }
 
@@ -721,18 +717,6 @@ struct CompanionPanelView: View {
                     set: { companionManager.setHermesOrchestratorEnabled($0) }
                 )
             )
-
-            connectionToggleRow(
-                title: "NanoClaw Auto",
-                subtitle: companionManager.isNanoClawOrchestratorEnabled
-                    ? "route long tasks to NanoClaw"
-                    : "NanoClaw idle",
-                systemImage: "shippingbox",
-                isOn: Binding(
-                    get: { companionManager.isNanoClawOrchestratorEnabled },
-                    set: { companionManager.setNanoClawOrchestratorEnabled($0) }
-                )
-            )
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
@@ -747,13 +731,10 @@ struct CompanionPanelView: View {
     }
 
     private var isLongTaskRouterEnabled: Bool {
-        companionManager.isHermesOrchestratorEnabled || companionManager.isNanoClawOrchestratorEnabled
+        companionManager.isHermesOrchestratorEnabled
     }
 
     private var longTaskRouterTitle: String {
-        if companionManager.isNanoClawOrchestratorEnabled {
-            return "NanoClaw"
-        }
         if companionManager.isHermesOrchestratorEnabled {
             return "Hermes"
         }
@@ -858,6 +839,17 @@ struct CompanionPanelView: View {
 
                 footerIconButton("Settings", systemImage: "gearshape") {
                     NotificationCenter.default.post(name: .tipTourOpenSettings, object: nil)
+                    NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
+                }
+
+                footerIconButton("Logs", systemImage: "doc.text.magnifyingglass") {
+                    PipelineLogStore.shared.record(
+                        category: "ui",
+                        name: "open_logs_window",
+                        status: "ok",
+                        message: "Opened TipTour logs window."
+                    )
+                    NotificationCenter.default.post(name: .tipTourOpenLogs, object: nil)
                     NotificationCenter.default.post(name: .tipTourDismissPanel, object: nil)
                 }
 

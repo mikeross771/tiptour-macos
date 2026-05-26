@@ -7,6 +7,8 @@ description: Use when controlling Blender UI, menus, modal transforms, object cr
 
 Blender is mostly a canvas app, so native macOS accessibility often cannot see its menus, viewport controls, or modal tool state. Prefer TipTour's local OCR/YOLO grounding for visible menu items and use Blender's keyboard modal commands for transform operations.
 
+Blender viewport objects are different from Blender UI labels. A visible mesh/object/shape such as a cube, cylinder, cone, roof, or house body usually has no reliable OCR/AX label on the canvas. For pointing at or clicking a viewport object, use fresh screenshot visual coordinates (`point_2d` preferred, `box_2d` acceptable) instead of a bare label like `Cylinder`, because bare labels can match the outliner, menus, or property text.
+
 For one-action-at-a-time control:
 
 - Add objects through the visible `Add` menu, then `Mesh`, then the object type.
@@ -17,6 +19,7 @@ For one-action-at-a-time control:
 - Never send `S`, a numeric value, and `Return` in one workflow plan. Never press `S` twice unless the previous scale command was cancelled.
 - Numeric transform input must behave like real keyboard typing. Do not paste numbers into Blender modal transform input.
 - When selecting from an open Blender menu, prefer the menu popup region over duplicate labels in the right outliner or properties sidebar.
+- When pointing at or clicking a 3D viewport object, do not rely on local target labels alone. Include visual coordinates from the screenshot, or ask TipTour for visual context first.
 - For deleting objects in Blender, use `A` to select all when needed, `X` to delete selected objects, then confirm with `Return`. Do not use a fuzzy OCR click to confirm deletion.
 
 ## Reliable House Recipe
@@ -120,6 +123,8 @@ For house tasks, prefer progress over perfection: create a body, a roof, a door,
     "For Blender delete confirmations, press Return as a targetless key action; do not use /v1/plan-next-action to click a fuzzy OCR confirmation target.",
     "For numeric transform input, send a type step with the value only, for example {\"type\":\"type\",\"value\":\"2\"}.",
     "When choosing objects from Add > Mesh, ask TipTour for visible targets and choose the open menu item, not duplicate labels in the outliner.",
+    "For pointing at or clicking a 3D viewport object such as a cube, cylinder, cone, roof, or house body, use screenshot visual coordinates: include point_2d when submitting a workflow step. Do not submit only a bare label like Cylinder because local OCR may match outliner/menu/property text instead of the object.",
+    "If you need visual context for a Blender viewport object, call /v1/visual-context with visual_context=\"auto\" and query or target_label set to the object name before deciding the next action.",
     "For a simple house: clear the scene, add a Cube for the body, scale it, add a Cone or Cube roof, move it up, then add small Cube door/window details. Wait for TipTour after every single action."
   ]
 }

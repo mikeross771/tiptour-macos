@@ -50,77 +50,195 @@ final class ActionExecutor {
         atGlobalScreenPoint globalScreenPoint: CGPoint,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.click(
-            atGlobalScreenPoint: globalScreenPoint,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: pointMetadata(globalScreenPoint)
         )
+        recordActionEvent(name: "click", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.click(
+                atGlobalScreenPoint: globalScreenPoint,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "click", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "click",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func rightClick(
         atGlobalScreenPoint globalScreenPoint: CGPoint,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.rightClick(
-            atGlobalScreenPoint: globalScreenPoint,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: pointMetadata(globalScreenPoint)
         )
+        recordActionEvent(name: "right_click", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.rightClick(
+                atGlobalScreenPoint: globalScreenPoint,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "right_click", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "right_click",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func doubleClick(
         atGlobalScreenPoint globalScreenPoint: CGPoint,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.doubleClick(
-            atGlobalScreenPoint: globalScreenPoint,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: pointMetadata(globalScreenPoint)
         )
+        recordActionEvent(name: "double_click", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.doubleClick(
+                atGlobalScreenPoint: globalScreenPoint,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "double_click", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "double_click",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func pressKeyboardShortcut(
         _ shortcutString: String,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.pressKeyboardShortcut(
-            shortcutString,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: ["shortcut": shortcutString]
         )
+        recordActionEvent(name: "keyboard_shortcut", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.pressKeyboardShortcut(
+                shortcutString,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "keyboard_shortcut", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "keyboard_shortcut",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func pressKey(
         _ keyName: String,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.pressKey(
-            keyName,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: ["key": keyName]
         )
+        recordActionEvent(name: "press_key", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.pressKey(
+                keyName,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "press_key", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "press_key",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func typeText(
         _ text: String,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.typeText(
-            text,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: [
+                "character_count": String(text.count),
+                "preview": String(text.prefix(80))
+            ]
         )
+        recordActionEvent(name: "type_text", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.typeText(
+                text,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "type_text", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "type_text",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func setFocusedValue(
         _ value: String,
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.setFocusedValue(
-            value,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: [
+                "character_count": String(value.count),
+                "preview": String(value.prefix(80))
+            ]
         )
+        recordActionEvent(name: "set_focused_value", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.setFocusedValue(
+                value,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "set_focused_value", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "set_focused_value",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func scroll(
@@ -129,26 +247,75 @@ final class ActionExecutor {
         by granularity: String = "line",
         activatingTargetApp targetApp: NSRunningApplication? = nil
     ) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.scroll(
-            direction: direction,
-            amount: amount,
-            by: granularity,
-            activatingTargetApp: targetApp
+        let metadata = actionMetadata(
+            targetApp: targetApp,
+            extra: [
+                "direction": direction,
+                "amount": String(amount),
+                "granularity": granularity
+            ]
         )
+        recordActionEvent(name: "scroll", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.scroll(
+                direction: direction,
+                amount: amount,
+                by: granularity,
+                activatingTargetApp: targetApp
+            )
+            recordActionEvent(name: "scroll", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "scroll",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func openApplication(named applicationName: String) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.openApplication(named: applicationName)
+        let metadata = ["application": applicationName]
+        recordActionEvent(name: "open_application", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.openApplication(named: applicationName)
+            recordActionEvent(name: "open_application", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "open_application",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func openURL(_ rawURLString: String, preferredApplicationName: String? = nil) async throws {
-        try ensureActionDriverEnabled()
-        try await actionDriver.openURL(
-            rawURLString,
-            preferredApplicationName: preferredApplicationName
-        )
+        var metadata = ["url": rawURLString]
+        if let preferredApplicationName {
+            metadata["preferred_application"] = preferredApplicationName
+        }
+        recordActionEvent(name: "open_url", status: "started", metadata: metadata)
+        do {
+            try ensureActionDriverEnabled()
+            try await actionDriver.openURL(
+                rawURLString,
+                preferredApplicationName: preferredApplicationName
+            )
+            recordActionEvent(name: "open_url", status: "ok", metadata: metadata)
+        } catch {
+            recordActionEvent(
+                name: "open_url",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: metadata
+            )
+            throw error
+        }
     }
 
     func setPendingTextReplacementRange(
@@ -161,12 +328,56 @@ final class ActionExecutor {
             location: location,
             length: length
         )
+        recordActionEvent(
+            name: "arm_text_replacement",
+            status: "ok",
+            metadata: [
+                "target_pid": String(processIdentifier),
+                "location": String(location),
+                "length": String(length)
+            ]
+        )
     }
 
     private func ensureActionDriverEnabled() throws {
         guard isActionDriverEnabledProvider?() ?? true else {
             throw ActionExecutorError.actionDriverDisabled(actionDriverDisplayName)
         }
+    }
+
+    private func actionMetadata(
+        targetApp: NSRunningApplication?,
+        extra: [String: String]
+    ) -> [String: String] {
+        var metadata = extra
+        if let targetApp {
+            metadata["target_app"] = targetApp.localizedName ?? "unknown"
+            metadata["target_bundle"] = targetApp.bundleIdentifier ?? "unknown"
+            metadata["target_pid"] = String(targetApp.processIdentifier)
+        }
+        return metadata
+    }
+
+    private func pointMetadata(_ point: CGPoint) -> [String: String] {
+        [
+            "x": String(format: "%.1f", point.x),
+            "y": String(format: "%.1f", point.y)
+        ]
+    }
+
+    private func recordActionEvent(
+        name: String,
+        status: String,
+        message: String? = nil,
+        metadata: [String: String]
+    ) {
+        PipelineLogStore.shared.record(
+            category: "action",
+            name: name,
+            status: status,
+            message: message,
+            metadata: metadata
+        )
     }
 }
 
@@ -936,6 +1147,18 @@ final class CuaActionDriver: TipTourActionDriver {
         "pagedown": 121,
         "home": 115,
         "end": 119,
-        "forwarddelete": 117
+        "forwarddelete": 117,
+        "f1": 122,
+        "f2": 120,
+        "f3": 99,
+        "f4": 118,
+        "f5": 96,
+        "f6": 97,
+        "f7": 98,
+        "f8": 100,
+        "f9": 101,
+        "f10": 109,
+        "f11": 103,
+        "f12": 111
     ]
 }

@@ -34,6 +34,12 @@ final class TipTourHarnessServer {
 
     func start() {
         guard listener == nil else { return }
+        PipelineLogStore.shared.record(
+            category: "harness",
+            name: "listener_start",
+            status: "started",
+            metadata: ["port": String(port.rawValue)]
+        )
 
         do {
             let parameters = NWParameters.tcp
@@ -52,6 +58,13 @@ final class TipTourHarnessServer {
             scheduleStartupReadinessCheck(for: listener)
         } catch {
             print("[Harness] failed to start local harness: \(error)")
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "listener_start",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["port": String(port.rawValue)]
+            )
             scheduleRestart()
         }
     }
@@ -61,6 +74,12 @@ final class TipTourHarnessServer {
         listenerReady = false
         listener?.cancel()
         listener = nil
+        PipelineLogStore.shared.record(
+            category: "harness",
+            name: "listener_stop",
+            status: "ok",
+            metadata: ["port": String(port.rawValue)]
+        )
     }
 
     private func configureAndStart(_ listener: NWListener) {
@@ -77,12 +96,32 @@ final class TipTourHarnessServer {
                     self.listenerReady = true
                     self.restartAttempts = 0
                     print("[Harness] TipTour local harness listening on http://127.0.0.1:\(self.port)")
+                    PipelineLogStore.shared.record(
+                        category: "harness",
+                        name: "listener_ready",
+                        status: "ok",
+                        metadata: ["port": String(self.port.rawValue)]
+                    )
                 case .waiting(let error):
                     self.listenerReady = false
                     print("[Harness] local harness waiting: \(error)")
+                    PipelineLogStore.shared.record(
+                        category: "harness",
+                        name: "listener_waiting",
+                        status: "warning",
+                        message: error.localizedDescription,
+                        metadata: ["port": String(self.port.rawValue)]
+                    )
                 case .failed(let error):
                     self.listenerReady = false
                     print("[Harness] local harness failed: \(error)")
+                    PipelineLogStore.shared.record(
+                        category: "harness",
+                        name: "listener_failed",
+                        status: "failed",
+                        message: error.localizedDescription,
+                        metadata: ["port": String(self.port.rawValue)]
+                    )
                     if self.listener === listener {
                         self.listener?.cancel()
                         self.listener = nil
@@ -94,6 +133,12 @@ final class TipTourHarnessServer {
                     self.listenerReady = false
                     guard !self.intentionallyStopped else { return }
                     print("[Harness] local harness cancelled unexpectedly")
+                    PipelineLogStore.shared.record(
+                        category: "harness",
+                        name: "listener_cancelled",
+                        status: "warning",
+                        metadata: ["port": String(self.port.rawValue)]
+                    )
                     if self.listener === listener {
                         self.listener = nil
                     }
@@ -117,6 +162,13 @@ final class TipTourHarnessServer {
                 }
 
                 print("[Harness] local harness did not become ready; restarting")
+                PipelineLogStore.shared.record(
+                    category: "harness",
+                    name: "listener_startup_check",
+                    status: "warning",
+                    message: "Listener did not become ready within the startup window.",
+                    metadata: ["port": String(self.port.rawValue)]
+                )
                 self.listener?.cancel()
                 self.listener = nil
                 self.scheduleRestart()
@@ -127,6 +179,16 @@ final class TipTourHarnessServer {
     private func scheduleRestart() {
         guard restartAttempts < maximumRestartAttempts else {
             print("[Harness] local harness restart limit reached")
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "listener_restart",
+                status: "failed",
+                message: "Restart limit reached.",
+                metadata: [
+                    "port": String(port.rawValue),
+                    "attempts": String(restartAttempts)
+                ]
+            )
             return
         }
 
@@ -136,6 +198,15 @@ final class TipTourHarnessServer {
             Task { @MainActor in
                 guard let self, self.listener == nil else { return }
                 print("[Harness] retrying local harness start (attempt \(attempt))")
+                PipelineLogStore.shared.record(
+                    category: "harness",
+                    name: "listener_restart",
+                    status: "started",
+                    metadata: [
+                        "port": String(self.port.rawValue),
+                        "attempt": String(attempt)
+                    ]
+                )
                 self.start()
             }
         }
@@ -155,6 +226,12 @@ final class TipTourHarnessServer {
 
             if let error {
                 print("[Harness] receive failed: \(error)")
+                PipelineLogStore.shared.record(
+                    category: "harness",
+                    name: "receive",
+                    status: "failed",
+                    message: error.localizedDescription
+                )
                 connection.cancel()
                 return
             }
@@ -195,6 +272,16 @@ final class TipTourHarnessServer {
 
     private func respond(to requestData: Data, on connection: NWConnection) async {
         let request = parseRequest(requestData)
+        PipelineLogStore.shared.record(
+            category: "harness",
+            name: "request",
+            status: "received",
+            metadata: [
+                "method": request.method,
+                "path": request.path,
+                "body_bytes": String(request.body.count)
+            ]
+        )
 
         let response: HarnessHTTPResponse
         switch (request.method, request.path) {
@@ -206,20 +293,46 @@ final class TipTourHarnessServer {
                 "ok": true,
                 "tools": [
                     "tiptour.observe",
+                    "tiptour.visual_context",
                     "tiptour.screenshots",
                     "tiptour.skills",
                     "tiptour.active_skill",
                     "tiptour.targets",
+                    "tiptour.ground_target",
+                    "tiptour.act",
                     "tiptour.plan_next_action",
                     "tiptour.action_history",
-                    "tiptour.submit_workflow_plan"
+                    "tiptour.submit_workflow_plan",
+                    "tiptour.tasks",
+                    "tiptour.task_status",
+                    "tiptour.task_events",
+                    "tiptour.cancel_task"
                 ],
                 "single_action": true,
+                "local_tasks": true,
+                "task_planning": false,
+                "task_storage": "memory",
                 "transport": "localhost-http"
             ])
         case ("GET", "/v1/observe"):
             activityReporter("Hermes observing the desktop")
             response = encodableResponse(tipTourEngine.observe())
+        case ("GET", "/v1/visual-context"), ("GET", "/v1/visual_context"), ("GET", "/v1/observation-snapshot"):
+            activityReporter("Hermes asking TipTour for visual context")
+            let visualContext = await tipTourEngine.visualContext(
+                intent: nil,
+                app: nil,
+                requestedMode: "auto",
+                reason: "observe",
+                targetLabel: nil,
+                targetID: nil,
+                targetMark: nil,
+                refresh: false
+            )
+            response = encodableResponse(visualContext)
+        case ("POST", "/v1/visual-context"), ("POST", "/v1/visual_context"), ("POST", "/v1/observation-snapshot"):
+            activityReporter("Hermes asking TipTour for visual context")
+            response = await handleVisualContextRequest(body: request.body)
         case ("GET", "/v1/screenshots"), ("GET", "/v1/screenshot"):
             activityReporter("Hermes reading screenshots")
             let screenshots = await tipTourEngine.screenshots()
@@ -233,9 +346,21 @@ final class TipTourHarnessServer {
         case ("GET", "/v1/targets"), ("GET", "/v1/grounding-targets"):
             activityReporter("Hermes checking screen targets")
             response = await handleTargetsRequest()
+        case ("POST", "/v1/ground-target"), ("POST", "/v1/ground_target"):
+            activityReporter("Hermes grounding a visible target")
+            response = await handleGroundTargetRequest(body: request.body)
         case ("GET", "/v1/action-history"), ("GET", "/v1/action_history"):
             activityReporter("Hermes checking recent actions")
             response = encodableResponse(tipTourEngine.actionHistory())
+        case ("GET", "/v1/tasks"):
+            activityReporter("Hermes checking TipTour tasks")
+            response = encodableResponse(tipTourEngine.longTasks())
+        case ("POST", "/v1/tasks"):
+            activityReporter("Hermes starting a TipTour task")
+            response = await handleStartTaskRequest(body: request.body)
+        case ("POST", "/v1/act"), ("POST", "/v1/action"):
+            activityReporter("Hermes executing one action")
+            response = await handlePlanNextActionRequest(body: request.body)
         case ("POST", "/v1/plan-next-action"), ("POST", "/v1/plan_next_action"):
             activityReporter("Hermes planning the next action")
             response = await handlePlanNextActionRequest(body: request.body)
@@ -243,12 +368,29 @@ final class TipTourHarnessServer {
             activityReporter("Hermes submitting one action")
             response = await handleWorkflowPlanRequest(body: request.body)
         default:
-            response = jsonResponse(
-                ["ok": false, "reason": "not_found"],
-                statusCode: 404,
-                statusText: "Not Found"
-            )
+            if let taskResponse = await handleTaskPathRequest(request) {
+                response = taskResponse
+            } else {
+                response = jsonResponse(
+                    ["ok": false, "reason": "not_found"],
+                    statusCode: 404,
+                    statusText: "Not Found"
+                )
+            }
         }
+
+        PipelineLogStore.shared.record(
+            category: "harness",
+            name: "response",
+            status: response.statusCode >= 400 ? "failed" : "ok",
+            metadata: [
+                "method": request.method,
+                "path": request.path,
+                "status_code": String(response.statusCode),
+                "status_text": response.statusText,
+                "response_bytes": String(response.bodyByteCount)
+            ]
+        )
 
         connection.send(content: response.data, completion: .contentProcessed { _ in
             connection.cancel()
@@ -263,12 +405,112 @@ final class TipTourHarnessServer {
         return encodableResponse(targets)
     }
 
+    private func handleVisualContextRequest(body: Data) async -> HarnessHTTPResponse {
+        do {
+            let request = body.isEmpty
+                ? HarnessVisualContextRequest()
+                : try JSONDecoder().decode(HarnessVisualContextRequest.self, from: body)
+            let result = await tipTourEngine.visualContext(
+                intent: request.normalizedIntent,
+                app: request.app,
+                requestedMode: request.normalizedVisualContextMode,
+                reason: request.normalizedReason,
+                targetLabel: request.normalizedTargetLabel,
+                targetID: request.normalizedTargetID,
+                targetMark: request.normalizedTargetMark,
+                refresh: request.shouldRefreshTargets
+            )
+            return encodableResponse(result)
+        } catch {
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "visual_context_decode",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["body_bytes": String(body.count)]
+            )
+            return jsonResponse(
+                [
+                    "ok": false,
+                    "reason": "invalid_request",
+                    "message": error.localizedDescription
+                ],
+                statusCode: 400,
+                statusText: "Bad Request"
+            )
+        }
+    }
+
+    private func handleGroundTargetRequest(body: Data) async -> HarnessHTTPResponse {
+        do {
+            let request = try JSONDecoder().decode(HarnessGroundTargetRequest.self, from: body)
+            guard request.hasGroundingInput else {
+                PipelineLogStore.shared.record(
+                    category: "harness",
+                    name: "ground_target_decode",
+                    status: "rejected",
+                    message: "Ground target request did not include query, goal, target_id, or target_mark.",
+                    metadata: ["body_bytes": String(body.count)]
+                )
+                return jsonResponse(
+                    [
+                        "ok": false,
+                        "reason": "missing_target_query",
+                        "message": "POST /v1/ground-target requires query, goal, target_label, target_id, or target_mark."
+                    ],
+                    statusCode: 400,
+                    statusText: "Bad Request"
+                )
+            }
+
+            let result = await tipTourEngine.groundTarget(
+                goal: request.normalizedGoal,
+                app: request.app,
+                actionType: request.normalizedActionType,
+                targetLabel: request.normalizedTargetLabel,
+                targetID: request.normalizedTargetID,
+                targetMark: request.normalizedTargetMark,
+                refresh: request.shouldRefreshTargets,
+                allowScreenshotPlanning: request.shouldAllowScreenshotPlanning,
+                allowAIMatch: request.shouldAllowAIMatch
+            )
+            return encodableResponse(result)
+        } catch {
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "ground_target_decode",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["body_bytes": String(body.count)]
+            )
+            return jsonResponse(
+                [
+                    "ok": false,
+                    "reason": "invalid_request",
+                    "message": error.localizedDescription
+                ],
+                statusCode: 400,
+                statusText: "Bad Request"
+            )
+        }
+    }
+
     private func handlePlanNextActionRequest(body: Data) async -> HarnessHTTPResponse {
         do {
             let request = try JSONDecoder().decode(HarnessPlanNextActionRequest.self, from: body)
             let result = await tipTourEngine.runPointerAction(request.pointerActionRequest)
-            return encodableResponse(result)
+            if request.shouldIncludeTargets {
+                return encodableResponse(result)
+            }
+            return encodableResponse(HarnessCompactPlanNextActionResponse(result))
         } catch {
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "plan_next_action_decode",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["body_bytes": String(body.count)]
+            )
             return jsonResponse(
                 [
                     "ok": false,
@@ -288,6 +530,13 @@ final class TipTourHarnessServer {
             let result = await tipTourEngine.submitSingleActionWorkflowPlanAndWait(plan)
             return encodableResponse(result)
         } catch {
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "workflow_plan_decode",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["body_bytes": String(body.count)]
+            )
             return jsonResponse(
                 [
                     "ok": false,
@@ -298,6 +547,90 @@ final class TipTourHarnessServer {
                 statusText: "Bad Request"
             )
         }
+    }
+
+    private func handleStartTaskRequest(body: Data) async -> HarnessHTTPResponse {
+        do {
+            let request = try JSONDecoder().decode(HarnessLongTaskStartRequest.self, from: body)
+            guard let prompt = request.normalizedPrompt else {
+                PipelineLogStore.shared.record(
+                    category: "harness",
+                    name: "task_start_decode",
+                    status: "rejected",
+                    message: "Task start request did not include a prompt.",
+                    metadata: ["body_bytes": String(body.count)]
+                )
+                return jsonResponse(
+                    [
+                        "ok": false,
+                        "reason": "missing_prompt",
+                        "message": "POST /v1/tasks requires prompt, goal, task, or title."
+                    ],
+                    statusCode: 400,
+                    statusText: "Bad Request"
+                )
+            }
+
+            let result = tipTourEngine.startLongTask(
+                title: request.title,
+                prompt: prompt,
+                app: request.app,
+                steps: request.longTaskSteps
+            )
+            return encodableResponse(result)
+        } catch {
+            PipelineLogStore.shared.record(
+                category: "harness",
+                name: "task_start_decode",
+                status: "failed",
+                message: error.localizedDescription,
+                metadata: ["body_bytes": String(body.count)]
+            )
+            return jsonResponse(
+                [
+                    "ok": false,
+                    "reason": "invalid_request",
+                    "message": error.localizedDescription
+                ],
+                statusCode: 400,
+                statusText: "Bad Request"
+            )
+        }
+    }
+
+    private func handleTaskPathRequest(_ request: HarnessHTTPRequest) async -> HarnessHTTPResponse? {
+        let pathParts = request.path.split(separator: "/").map(String.init)
+        guard pathParts.count >= 3,
+              pathParts[0] == "v1",
+              pathParts[1] == "tasks" else {
+            return nil
+        }
+
+        let taskID = pathParts[2]
+        if pathParts.count == 3, request.method == "GET" {
+            activityReporter("Hermes checking TipTour task \(taskID)")
+            return encodableResponse(tipTourEngine.longTask(id: taskID))
+        }
+
+        if pathParts.count == 4,
+           pathParts[3] == "events",
+           request.method == "GET" {
+            activityReporter("Hermes reading TipTour task events")
+            return encodableResponse(tipTourEngine.longTaskEvents(id: taskID))
+        }
+
+        if pathParts.count == 4,
+           pathParts[3] == "cancel",
+           request.method == "POST" {
+            activityReporter("Hermes cancelling TipTour task")
+            return encodableResponse(tipTourEngine.cancelLongTask(id: taskID))
+        }
+
+        return jsonResponse(
+            ["ok": false, "reason": "not_found"],
+            statusCode: 404,
+            statusText: "Not Found"
+        )
     }
 
     private func parseRequest(_ requestData: Data) -> HarnessHTTPRequest {
@@ -352,7 +685,12 @@ final class TipTourHarnessServer {
         responseData.append(Data("Access-Control-Allow-Origin: http://127.0.0.1\r\n".utf8))
         responseData.append(Data("\r\n".utf8))
         responseData.append(body)
-        return HarnessHTTPResponse(data: responseData)
+        return HarnessHTTPResponse(
+            data: responseData,
+            statusCode: statusCode,
+            statusText: statusText,
+            bodyByteCount: body.count
+        )
     }
 }
 
@@ -364,6 +702,87 @@ private struct HarnessHTTPRequest {
 
 private struct HarnessHTTPResponse {
     let data: Data
+    let statusCode: Int
+    let statusText: String
+    let bodyByteCount: Int
+}
+
+private struct HarnessVisualContextRequest: Decodable {
+    let intent: String?
+    let goal: String?
+    let task: String?
+    let reason: String?
+    let app: String?
+    let visualContext: String?
+    let visual_context: String?
+    let mode: String?
+    let targetLabel: String?
+    let target_label: String?
+    let label: String?
+    let query: String?
+    let targetID: String?
+    let target_id: String?
+    let targetMark: Int?
+    let target_mark: Int?
+    let refresh: Bool?
+    let refreshTargets: Bool?
+    let refresh_targets: Bool?
+
+    init() {
+        self.intent = nil
+        self.goal = nil
+        self.task = nil
+        self.reason = nil
+        self.app = nil
+        self.visualContext = nil
+        self.visual_context = nil
+        self.mode = nil
+        self.targetLabel = nil
+        self.target_label = nil
+        self.label = nil
+        self.query = nil
+        self.targetID = nil
+        self.target_id = nil
+        self.targetMark = nil
+        self.target_mark = nil
+        self.refresh = nil
+        self.refreshTargets = nil
+        self.refresh_targets = nil
+    }
+
+    var normalizedIntent: String? {
+        firstNonEmpty(intent, goal, task)
+    }
+
+    var normalizedReason: String? {
+        firstNonEmpty(reason)
+    }
+
+    var normalizedVisualContextMode: String? {
+        firstNonEmpty(visualContext, visual_context, mode)
+    }
+
+    var normalizedTargetLabel: String? {
+        firstNonEmpty(query, targetLabel, target_label, label)
+    }
+
+    var normalizedTargetID: String? {
+        firstNonEmpty(targetID, target_id)
+    }
+
+    var normalizedTargetMark: Int? {
+        targetMark ?? target_mark
+    }
+
+    var shouldRefreshTargets: Bool {
+        refreshTargets ?? refresh_targets ?? refresh ?? true
+    }
+
+    private func firstNonEmpty(_ values: String?...) -> String? {
+        values
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
 }
 
 private struct HarnessPlanNextActionRequest: Decodable {
@@ -383,6 +802,9 @@ private struct HarnessPlanNextActionRequest: Decodable {
     let allow_screenshot_planning: Bool?
     let validateStateChange: Bool?
     let validate_state_change: Bool?
+    let includeTargets: Bool?
+    let include_targets: Bool?
+    let debug: Bool?
 
     var pointerActionRequest: PointerActionRequest {
         PointerActionRequest(
@@ -396,6 +818,111 @@ private struct HarnessPlanNextActionRequest: Decodable {
             allowScreenshotPlanning: allowScreenshotPlanning ?? allow_screenshot_planning ?? false,
             validateStateChange: validateStateChange ?? validate_state_change ?? true
         )
+    }
+
+    var shouldIncludeTargets: Bool {
+        includeTargets ?? include_targets ?? debug ?? false
+    }
+}
+
+private struct HarnessCompactPlanNextActionResponse: Encodable {
+    let ok: Bool
+    let reason: String?
+    let message: String?
+    let activeApp: String?
+    let plannedStep: TipTourEnginePlannedActionStep?
+    let submission: TipTourEngineSubmissionResult?
+    let workflowOutcome: TipTourEngineWorkflowOutcome?
+    let validation: TipTourEngineActionValidation?
+    let attempts: [TipTourEngineActionAttempt]
+    let repaired: Bool
+    let targetCount: Int
+
+    init(_ result: TipTourEnginePlanNextActionResult) {
+        self.ok = result.ok
+        self.reason = result.reason
+        self.message = result.message
+        self.activeApp = result.activeApp
+        self.plannedStep = result.plannedStep
+        self.submission = result.submission
+        self.workflowOutcome = result.workflowOutcome
+        self.validation = result.validation
+        self.attempts = result.attempts
+        self.repaired = result.repaired
+        self.targetCount = result.targets.count
+    }
+}
+
+private struct HarnessGroundTargetRequest: Decodable {
+    let query: String?
+    let intent: String?
+    let goal: String?
+    let app: String?
+    let type: String?
+    let action: String?
+    let targetLabel: String?
+    let target_label: String?
+    let label: String?
+    let targetID: String?
+    let target_id: String?
+    let targetMark: Int?
+    let target_mark: Int?
+    let refresh: Bool?
+    let refreshTargets: Bool?
+    let refresh_targets: Bool?
+    let allowScreenshotPlanning: Bool?
+    let allow_screenshot_planning: Bool?
+    let allowAIMatch: Bool?
+    let allow_ai_match: Bool?
+    let aiMatch: Bool?
+    let ai_match: Bool?
+
+    var hasGroundingInput: Bool {
+        normalizedTargetLabel != nil
+            || firstNonEmpty(intent, goal) != nil
+            || normalizedTargetID != nil
+            || normalizedTargetMark != nil
+    }
+
+    var normalizedGoal: String {
+        firstNonEmpty(intent, goal, query, targetLabel, target_label, label, targetID, target_id)
+            ?? targetMark.map { "target \($0)" }
+            ?? target_mark.map { "target \($0)" }
+            ?? "ground visible target"
+    }
+
+    var normalizedActionType: WorkflowStep.StepType {
+        WorkflowStep.StepType.normalized(from: type ?? action)
+    }
+
+    var normalizedTargetLabel: String? {
+        firstNonEmpty(query, targetLabel, target_label, label)
+    }
+
+    var normalizedTargetID: String? {
+        firstNonEmpty(targetID, target_id)
+    }
+
+    var normalizedTargetMark: Int? {
+        targetMark ?? target_mark
+    }
+
+    var shouldRefreshTargets: Bool {
+        refreshTargets ?? refresh_targets ?? refresh ?? true
+    }
+
+    var shouldAllowScreenshotPlanning: Bool {
+        allowScreenshotPlanning ?? allow_screenshot_planning ?? false
+    }
+
+    var shouldAllowAIMatch: Bool {
+        allowAIMatch ?? allow_ai_match ?? aiMatch ?? ai_match ?? false
+    }
+
+    private func firstNonEmpty(_ values: String?...) -> String? {
+        values
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
     }
 }
 
@@ -412,6 +939,31 @@ private struct HarnessWorkflowPlanRequest: Decodable {
                 step.toWorkflowStep(index: index)
             }
         )
+    }
+}
+
+private struct HarnessLongTaskStartRequest: Decodable {
+    let title: String?
+    let prompt: String?
+    let goal: String?
+    let task: String?
+    let app: String?
+    let steps: [HarnessWorkflowStepRequest]?
+
+    var normalizedPrompt: String? {
+        let candidate = prompt ?? goal ?? task ?? title
+        let trimmedCandidate = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedCandidate.isEmpty ? nil : trimmedCandidate
+    }
+
+    var longTaskSteps: [TipTourLongTaskStep] {
+        let taskGoal = normalizedPrompt ?? "Local task"
+        return (steps ?? []).enumerated().map { index, step in
+            step.toLongTaskStep(
+                index: index,
+                defaultGoal: taskGoal
+            )
+        }
     }
 }
 
@@ -436,6 +988,11 @@ private struct HarnessWorkflowStepRequest: Decodable {
     let hint: String?
     let targetContext: String?
     let target_context: String?
+    let title: String?
+    let settleDelayMs: Int?
+    let settle_delay_ms: Int?
+    let refreshTargetsAfter: Bool?
+    let refresh_targets_after: Bool?
     let point_2d: [Int]?
     let box_2d: [Int]?
     let screenNumber: Int?
@@ -463,6 +1020,36 @@ private struct HarnessWorkflowStepRequest: Decodable {
             hintY: nil,
             box2DNormalized: box_2d ?? normalizedPointBox,
             screenNumber: screenNumber ?? screen
+        )
+    }
+
+    func toLongTaskStep(index: Int, defaultGoal: String) -> TipTourLongTaskStep {
+        let workflowStep = toWorkflowStep(index: index)
+        let actionLabelCandidates = [
+            label,
+            targetLabel,
+            target_label,
+            key,
+            shortcut,
+            value,
+            text,
+            workflowStep.type.rawValue
+        ]
+        let actionLabel = actionLabelCandidates
+            .compactMap { $0 }
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            ?? workflowStep.type.rawValue
+        let stepTitle = title ?? hint ?? "Step \(index + 1)"
+        let stepGoal = hint ?? defaultGoal
+        let settleDelay = max(0, settleDelayMs ?? settle_delay_ms ?? 0)
+        let shouldRefreshTargets = refreshTargetsAfter ?? refresh_targets_after ?? false
+        return TipTourLongTaskStep(
+            title: stepTitle,
+            goal: stepGoal,
+            actionLabel: String(actionLabel.prefix(120)),
+            workflowStep: workflowStep,
+            settleDelayMilliseconds: settleDelay,
+            refreshTargetsAfter: shouldRefreshTargets
         )
     }
 }

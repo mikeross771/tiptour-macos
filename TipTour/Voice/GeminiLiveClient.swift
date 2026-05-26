@@ -16,6 +16,7 @@
 //     and turn lifecycle events (turnComplete, interrupted, etc.)
 //
 
+import Combine
 import Foundation
 
 /// Events received from the Gemini Live WebSocket.

@@ -80,9 +80,6 @@ struct PointerAgentCardView: View {
     }
 
     private var pointerAgentSubtitle: String {
-        if companionManager.isNanoClawOrchestratorEnabled {
-            return "Auto routes bigger tasks to NanoClaw."
-        }
         if companionManager.isHermesOrchestratorEnabled {
             return "Auto routes bigger tasks to Hermes."
         }

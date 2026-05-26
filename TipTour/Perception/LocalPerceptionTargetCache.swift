@@ -318,10 +318,18 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         if queryLower == labelLower { return 100 }
         if normalizedQuery.full == normalizedLabel.full { return 92 }
 
-        if queryLower.count >= minimumSubstringLength,
-           labelLower.count >= minimumSubstringLength,
+        if queryLower.count >= 5,
+           labelLower.count >= 5,
            (labelLower.contains(queryLower) || queryLower.contains(labelLower)) {
             return 72
+        }
+
+        if normalizedQuery.words.count == 1,
+           normalizedLabel.words.count == 1,
+           let queryWord = normalizedQuery.words.first,
+           let labelWord = normalizedLabel.words.first,
+           let fuzzyScore = Self.fuzzySingleWordLabelScore(query: queryWord, label: labelWord) {
+            return fuzzyScore
         }
 
         let sharedWords = normalizedQuery.words
@@ -344,6 +352,43 @@ final class LocalPerceptionTargetCache: @unchecked Sendable {
         let rawWords = lowercasedText.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         let meaningfulWords = rawWords.filter { !stopWords.contains($0) }
         return (full: lowercasedText, words: Set(meaningfulWords.isEmpty ? rawWords : meaningfulWords))
+    }
+
+    private static func fuzzySingleWordLabelScore(query: String, label: String) -> Double? {
+        guard min(query.count, label.count) >= 4,
+              max(query.count, label.count) <= 16 else {
+            return nil
+        }
+
+        let distance = editDistance(query, label)
+        if distance == 1 { return 68 }
+        if distance == 2, max(query.count, label.count) >= 8 { return 54 }
+        return nil
+    }
+
+    private static func editDistance(_ firstText: String, _ secondText: String) -> Int {
+        let firstCharacters = Array(firstText)
+        let secondCharacters = Array(secondText)
+        guard !firstCharacters.isEmpty else { return secondCharacters.count }
+        guard !secondCharacters.isEmpty else { return firstCharacters.count }
+
+        var previousRow = Array(0...secondCharacters.count)
+        var currentRow = Array(repeating: 0, count: secondCharacters.count + 1)
+
+        for firstIndex in 1...firstCharacters.count {
+            currentRow[0] = firstIndex
+            for secondIndex in 1...secondCharacters.count {
+                let substitutionCost = firstCharacters[firstIndex - 1] == secondCharacters[secondIndex - 1] ? 0 : 1
+                currentRow[secondIndex] = min(
+                    previousRow[secondIndex] + 1,
+                    currentRow[secondIndex - 1] + 1,
+                    previousRow[secondIndex - 1] + substitutionCost
+                )
+            }
+            previousRow = currentRow
+        }
+
+        return previousRow[secondCharacters.count]
     }
 
     private func screenshotPixelRectToGlobalScreen(

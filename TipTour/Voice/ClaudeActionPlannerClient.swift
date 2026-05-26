@@ -5,6 +5,24 @@ struct ClaudeActionPlannerResult {
 }
 
 struct ClaudeActionPlannerClient {
+    private struct PlannerTarget: Encodable {
+        let id: String
+        let mark: Int
+        let label: String
+        let source: String
+        let confidence: Double
+        let box2D: [Int]
+
+        init(_ target: LocalPerceptionTargetCache.SnapshotTarget) {
+            id = target.id
+            mark = target.mark
+            label = target.label
+            source = target.source
+            confidence = target.confidence
+            box2D = target.normalizedBox2D
+        }
+    }
+
     private struct MessagesRequest: Encodable {
         let model: String
         let maxTokens: Int
@@ -184,7 +202,11 @@ struct ClaudeActionPlannerClient {
         focusHighlightContext: String?
     ) -> String {
         let encodedTargets: String
-        if let targetData = try? JSONEncoder().encode(Array(localTargets.prefix(120))),
+        let plannerTargets = localTargets
+            .filter { !$0.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .prefix(80)
+            .map(PlannerTarget.init)
+        if let targetData = try? JSONEncoder().encode(plannerTargets),
            let targetJSON = String(data: targetData, encoding: .utf8) {
             encodedTargets = targetJSON
         } else {

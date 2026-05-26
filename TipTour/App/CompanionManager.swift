@@ -57,10 +57,6 @@ final class CompanionManager: ObservableObject {
     @Published var isHermesOrchestratorEnabled: Bool = TipTourDefaults.isHermesOrchestratorEnabled
     @Published var hermesAPIBaseURL: String = TipTourDefaults.hermesAPIBaseURL
     @Published private(set) var hermesConnectionStatus: HermesConnectionStatus = .idle
-    @Published var isNanoClawOrchestratorEnabled: Bool = TipTourDefaults.isNanoClawOrchestratorEnabled
-    @Published var nanoClawAPIBaseURL: String = TipTourDefaults.nanoClawAPIBaseURL
-    @Published var nanoClawCLIExecutablePath: String = TipTourDefaults.nanoClawCLIExecutablePath
-    @Published private(set) var nanoClawConnectionStatus: NanoClawConnectionStatus = .idle
 
     /// Whether the blue cursor overlay is currently visible on screen.
     @Published private(set) var isOverlayVisible: Bool = false
@@ -102,11 +98,8 @@ final class CompanionManager: ObservableObject {
     private var voiceModelSpeakingCancellable: AnyCancellable?
     private let claudeActionPlannerClient = ClaudeActionPlannerClient()
     private let hermesAgentClient = HermesAgentClient()
-    private let nanoClawAgentClient = NanoClawAgentClient()
     private var hermesSessionID: String?
-    private var nanoClawSessionID: String?
     private var isTextCommandHermesWorkflowActive = false
-    private var isTextCommandNanoClawWorkflowActive = false
     private lazy var textCommandPanelManager = TextCommandPanelManager(companionManager: self)
     private var detectionOverlayTask: Task<Void, Never>?
     private var postActionDetectionRefreshTask: Task<Void, Never>?
@@ -165,7 +158,7 @@ final class CompanionManager: ObservableObject {
     }
 
     func reportHermesHarnessActivity(_ activityText: String) {
-        guard isTextCommandHermesWorkflowActive || isTextCommandNanoClawWorkflowActive else { return }
+        guard isTextCommandHermesWorkflowActive else { return }
         textCommandActivityText = activityText
         lastTranscript = activityText
     }
@@ -557,7 +550,26 @@ final class CompanionManager: ObservableObject {
     /// raw tool args into a WorkflowPlan and kicks off the runner.
     @MainActor
     private func handleToolSubmitWorkflowPlan(id: String, goal: String, app: String, steps: [[String: Any]]) async -> [String: Any] {
+        PipelineLogStore.shared.record(
+            category: "voice_tool",
+            name: "submit_workflow_plan",
+            status: "received",
+            message: goal,
+            metadata: [
+                "tool_call_id": id,
+                "app": app,
+                "step_count": String(steps.count)
+            ]
+        )
+
         if let rejection = rejectIfToolCallShouldNotRun(id: id, toolName: "submit_workflow_plan") {
+            PipelineLogStore.shared.record(
+                category: "voice_tool",
+                name: "submit_workflow_plan",
+                status: "rejected",
+                message: rejection["reason"] as? String,
+                metadata: ["tool_call_id": id]
+            )
             return rejection
         }
 
@@ -565,6 +577,17 @@ final class CompanionManager: ObservableObject {
             let isSameGoalAsActivePlan = activePlan.goal.caseInsensitiveCompare(goal) == .orderedSame
             if isSameGoalAsActivePlan {
                 print("[Tool] ⏭️  rejecting submit_workflow_plan — same-goal re-submit of \"\(activePlan.goal)\" (already on step \(WorkflowRunner.shared.activeStepIndex + 1)/\(activePlan.steps.count))")
+                PipelineLogStore.shared.record(
+                    category: "voice_tool",
+                    name: "submit_workflow_plan",
+                    status: "rejected",
+                    message: "Same goal already running.",
+                    metadata: [
+                        "tool_call_id": id,
+                        "reason": "plan_already_running",
+                        "active_goal": activePlan.goal
+                    ]
+                )
                 return [
                     "ok": false,
                     "reason": "plan_already_running",
@@ -572,6 +595,13 @@ final class CompanionManager: ObservableObject {
                 ]
             }
             print("[Tool] 🔄 superseding active plan \"\(activePlan.goal)\" with new request \"\(goal)\"")
+            PipelineLogStore.shared.record(
+                category: "workflow",
+                name: "supersede_active_plan",
+                status: "warning",
+                message: goal,
+                metadata: ["previous_goal": activePlan.goal]
+            )
             WorkflowRunner.shared.stop()
         }
 
@@ -631,12 +661,26 @@ final class CompanionManager: ObservableObject {
 
         guard !normalizedSteps.isEmpty else {
             print("[Tool] ✗ submit_workflow_plan — zero steps")
+            PipelineLogStore.shared.record(
+                category: "voice_tool",
+                name: "submit_workflow_plan",
+                status: "rejected",
+                message: "No workflow steps were provided.",
+                metadata: ["tool_call_id": id, "reason": "empty_steps"]
+            )
             return ["ok": false, "reason": "empty_steps"]
         }
 
         guard isAutopilotEnabled else {
             print("[Tool] ✗ submit_workflow_plan — Autopilot off")
             voiceBackend.invalidateScreenshotHashCache()
+            PipelineLogStore.shared.record(
+                category: "voice_tool",
+                name: "submit_workflow_plan",
+                status: "rejected",
+                message: "Autopilot is off.",
+                metadata: ["tool_call_id": id, "reason": "autopilot_disabled"]
+            )
             return [
                 "ok": false,
                 "reason": "autopilot_disabled",
@@ -656,6 +700,19 @@ final class CompanionManager: ObservableObject {
         )
         let stepLabels = parsedSteps.map { $0.label ?? "<unlabeled>" }
         print("[Tool] ✓ submit_workflow_plan → \(plan.app ?? "?"): \(stepLabels)")
+        PipelineLogStore.shared.record(
+            category: "voice_tool",
+            name: "submit_workflow_plan",
+            status: "accepted",
+            message: goal,
+            metadata: [
+                "tool_call_id": id,
+                "app": plan.app ?? "",
+                "accepted_steps": String(stepLabels.count),
+                "ignored_steps": String(max(0, normalizedSteps.count - parsedSteps.count)),
+                "first_step": stepLabels.first ?? ""
+            ]
+        )
         startWorkflowPlan(plan)
 
         voiceBackend.suppressScreenshotsUntilUserSpeaks()
@@ -727,10 +784,6 @@ final class CompanionManager: ObservableObject {
     func setHermesOrchestratorEnabled(_ enabled: Bool) {
         isHermesOrchestratorEnabled = enabled
         TipTourDefaults.isHermesOrchestratorEnabled = enabled
-        if enabled {
-            isNanoClawOrchestratorEnabled = false
-            TipTourDefaults.isNanoClawOrchestratorEnabled = false
-        }
         guard enabled else { return }
         Task {
             await detectHermesConnection()
@@ -785,100 +838,6 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    func setNanoClawOrchestratorEnabled(_ enabled: Bool) {
-        isNanoClawOrchestratorEnabled = enabled
-        TipTourDefaults.isNanoClawOrchestratorEnabled = enabled
-        if enabled {
-            isHermesOrchestratorEnabled = false
-            TipTourDefaults.isHermesOrchestratorEnabled = false
-        }
-        guard enabled else { return }
-        Task {
-            await detectNanoClawConnection()
-        }
-    }
-
-    func setNanoClawAPIBaseURL(_ baseURL: String) {
-        let normalizedBaseURL = NanoClawAgentClient.normalizedBaseURL(baseURL)
-        nanoClawAPIBaseURL = normalizedBaseURL
-        TipTourDefaults.nanoClawAPIBaseURL = normalizedBaseURL
-        nanoClawConnectionStatus = NanoClawConnectionStatus(
-            state: .idle,
-            mode: .none,
-            baseURL: normalizedBaseURL,
-            cliExecutablePath: nanoClawCLIExecutablePath,
-            detail: "NanoClaw has not been checked yet.",
-            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
-        )
-    }
-
-    func setNanoClawCLIExecutablePath(_ cliExecutablePath: String) {
-        let trimmedPath = cliExecutablePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedPath = trimmedPath.isEmpty ? "claw" : trimmedPath
-        nanoClawCLIExecutablePath = normalizedPath
-        TipTourDefaults.nanoClawCLIExecutablePath = normalizedPath
-        nanoClawConnectionStatus = NanoClawConnectionStatus(
-            state: .idle,
-            mode: .none,
-            baseURL: nanoClawAPIBaseURL,
-            cliExecutablePath: normalizedPath,
-            detail: "NanoClaw has not been checked yet.",
-            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
-        )
-    }
-
-    func testNanoClawConnection() async {
-        nanoClawConnectionStatus = NanoClawConnectionStatus(
-            state: .checking,
-            mode: .none,
-            baseURL: nanoClawAPIBaseURL,
-            cliExecutablePath: nanoClawCLIExecutablePath,
-            detail: "Checking NanoClaw API and CLI.",
-            detectedInstallPath: nanoClawConnectionStatus.detectedInstallPath
-        )
-        let status = await nanoClawAgentClient.testConnection(baseURL: nanoClawAPIBaseURL)
-        nanoClawConnectionStatus = status
-        if status.state == .connected {
-            setNanoClawAPIBaseURL(status.baseURL)
-            setNanoClawCLIExecutablePath(status.cliExecutablePath)
-            nanoClawConnectionStatus = status
-        }
-    }
-
-    func detectNanoClawConnection() async {
-        nanoClawConnectionStatus = NanoClawConnectionStatus(
-            state: .checking,
-            mode: .none,
-            baseURL: nanoClawAPIBaseURL,
-            cliExecutablePath: nanoClawCLIExecutablePath,
-            detail: "Looking for NanoClaw.",
-            detectedInstallPath: nil
-        )
-
-        let status = await nanoClawAgentClient.detectLocalConnection()
-        nanoClawConnectionStatus = status
-        switch status.state {
-        case .connected:
-            setNanoClawAPIBaseURL(status.baseURL)
-            setNanoClawCLIExecutablePath(status.cliExecutablePath)
-            nanoClawConnectionStatus = status
-        default:
-            break
-        }
-    }
-
-    var nanoClawConnectionDetail: String {
-        nanoClawConnectionStatus.detail
-    }
-
-    var nanoClawConnectionState: HermesConnectionState {
-        nanoClawConnectionStatus.state
-    }
-
-    var nanoClawDetectedInstallPath: String? {
-        nanoClawConnectionStatus.detectedInstallPath
-    }
-
     var tipTourConnections: [TipTourConnection] {
         [
             TipTourConnection(
@@ -894,13 +853,6 @@ final class CompanionManager: ObservableObject {
                 kind: .orchestrator,
                 description: "Optional long-running reasoning, memory, skills, and external tool orchestration.",
                 isEnabled: isHermesOrchestratorEnabled
-            ),
-            TipTourConnection(
-                id: "nanoclaw-orchestrator",
-                displayName: "NanoClaw",
-                kind: .orchestrator,
-                description: "Optional lightweight local long-task agent through a NanoClaw API adapter or claw CLI.",
-                isEnabled: isNanoClawOrchestratorEnabled
             )
         ]
     }
@@ -2350,6 +2302,9 @@ final class CompanionManager: ObservableObject {
         point_2d = OPTIONAL exact click/target point in [y, x] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include this whenever you can, especially for Blender, games, canvas tools, tiny controls, toolbar icons, dense menus, and anything where the center of a box might be wrong. if local labels are ambiguous, the screenshot plus point_2d is the source of truth.
         box_2d = OPTIONAL bounding box for the step's element in [y1, x1, y2, x2] form, each value in [0, 1000] normalized to the current screenshot. origin top-left, y first. include it as supporting context when useful, but point_2d is preferred for the actual target location.
 
+    CANVAS / VISUAL OBJECT RULE (CRITICAL):
+      for Blender, games, drawing tools, 3D editors, and canvas apps, visible objects/shapes/models are NOT normal UI labels. if the user asks to point at or click a visible object such as a cube, cylinder, sphere, mesh, house, model, node, stroke, or shape, you MUST include point_2d. a label like "Cylinder" by itself may resolve to menu/outliner/OCR text instead of the object on the canvas. if you cannot localize the object on the screenshot, do not call the tool; say briefly that you cannot see the exact object yet.
+
     STEP TYPES (for submit_workflow_plan):
     every step has an optional `type` field. omit it and it defaults to "click", which is what 95% of steps are. only emit a non-click type when the step is genuinely not a click on visible UI.
 
@@ -2404,7 +2359,7 @@ final class CompanionManager: ObservableObject {
     - exactly ONE tool call per turn. never the same tool twice.
     - exactly ONE step inside submit_workflow_plan. never chain actions.
     - any computer control → submit_workflow_plan.
-    - for "where is it" / pointing-only requests, do not call a tool; answer conversationally from the screenshot.
+    - for "where is it" / pointing-only requests, use type:"observe" when you can identify one exact visible target; include point_2d for Blender/canvas objects. if you cannot identify one exact target, answer conversationally from the screenshot instead.
     - no UI involvement (pure knowledge or chit-chat) → no tool, just speak.
 
     POST-TOOL-CALL NARRATION RULE (CRITICAL — read every time):
@@ -2665,6 +2620,12 @@ final class CompanionManager: ObservableObject {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else { return }
 
+        PipelineLogStore.shared.record(
+            category: "text_command",
+            name: "submitted",
+            status: "received",
+            message: trimmedPrompt
+        )
         textCommandActivityText = "Planning"
         voiceState = .processing
 
@@ -2676,13 +2637,36 @@ final class CompanionManager: ObservableObject {
             if !submissionResult.ok {
                 lastTranscript = "Text command failed: \(submissionResult.reason ?? "unknown")"
                 textCommandActivityText = "Failed - \(submissionResult.reason ?? "unknown")"
+                PipelineLogStore.shared.record(
+                    category: "text_command",
+                    name: "completed",
+                    status: "failed",
+                    message: submissionResult.message,
+                    metadata: ["reason": submissionResult.reason ?? "unknown"]
+                )
             } else {
                 textCommandActivityText = "Action sent"
+                PipelineLogStore.shared.record(
+                    category: "text_command",
+                    name: "completed",
+                    status: "ok",
+                    message: submissionResult.message,
+                    metadata: [
+                        "accepted_steps": String(submissionResult.acceptedSteps),
+                        "ignored_steps": String(submissionResult.ignoredSteps)
+                    ]
+                )
             }
         } catch {
             lastTranscript = error.localizedDescription
             textCommandActivityText = "Error - \(error.localizedDescription)"
             print("[TextCommand] failed: \(error.localizedDescription)")
+            PipelineLogStore.shared.record(
+                category: "text_command",
+                name: "error",
+                status: "error",
+                message: error.localizedDescription
+            )
         }
 
         voiceState = .idle
@@ -2700,6 +2684,17 @@ final class CompanionManager: ObservableObject {
             targetAppName: targetAppName,
             longTaskAgent: activeLongTaskAgent
         )
+        PipelineLogStore.shared.record(
+            category: "router",
+            name: "route_prompt",
+            status: "ok",
+            message: route.reason,
+            metadata: [
+                "source": sourceLabel,
+                "target_app": targetAppName ?? "",
+                "long_task_agent": activeLongTaskAgent == nil ? "none" : "hermes"
+            ]
+        )
         if sourceLabel == "TextCommand" {
             textCommandActivityText = "Routing - \(route.reason)"
         }
@@ -2716,6 +2711,13 @@ final class CompanionManager: ObservableObject {
             }
 
             print("[\(sourceLabel)] local pointer action missed: \(planResult.reason ?? "unknown")")
+            PipelineLogStore.shared.record(
+                category: "router",
+                name: "local_action_missed",
+                status: "warning",
+                message: planResult.message,
+                metadata: ["reason": planResult.reason ?? "unknown"]
+            )
             if sourceLabel == "TextCommand" {
                 textCommandActivityText = "Asking Claude"
             }
@@ -2723,13 +2725,6 @@ final class CompanionManager: ObservableObject {
         case .hermesLongTask:
             print("[\(sourceLabel)] routing to Hermes: \(route.reason)")
             return try await runHermesPromptWorkflow(
-                prompt: prompt,
-                sourceLabel: sourceLabel
-            )
-
-        case .nanoClawLongTask:
-            print("[\(sourceLabel)] routing to NanoClaw: \(route.reason)")
-            return try await runNanoClawPromptWorkflow(
                 prompt: prompt,
                 sourceLabel: sourceLabel
             )
@@ -2773,9 +2768,6 @@ final class CompanionManager: ObservableObject {
     }
 
     private var activeLongTaskAgent: PointerPromptRouter.LongTaskAgent? {
-        if isNanoClawOrchestratorEnabled {
-            return .nanoClaw
-        }
         if isHermesOrchestratorEnabled {
             return .hermes
         }
@@ -2798,6 +2790,13 @@ final class CompanionManager: ObservableObject {
             isTextCommandHermesWorkflowActive = true
             textCommandActivityText = "Connecting to Hermes"
         }
+        PipelineLogStore.shared.record(
+            category: "hermes",
+            name: "start",
+            status: "received",
+            message: prompt,
+            metadata: ["source": sourceLabel]
+        )
         defer {
             if shouldReportTextCommandActivity {
                 isTextCommandHermesWorkflowActive = false
@@ -2815,6 +2814,16 @@ final class CompanionManager: ObservableObject {
             captures = []
         }
         print("[\(sourceLabel)] Hermes captures=\(captures.count)")
+        PipelineLogStore.shared.record(
+            category: "hermes",
+            name: "captures",
+            status: "ok",
+            metadata: [
+                "source": sourceLabel,
+                "capture_count": String(captures.count),
+                "screenshots_enabled": String(isScreenshotStreamingEnabled)
+            ]
+        )
 
         let hermesPrompt = hermesPromptWithTipTourContext(
             prompt,
@@ -2839,6 +2848,13 @@ final class CompanionManager: ObservableObject {
                     guard let self else { return }
                     let statusText = "Hermes action - \(progressText)"
                     self.lastTranscript = statusText
+                    PipelineLogStore.shared.record(
+                        category: "hermes",
+                        name: "tool_progress",
+                        status: "info",
+                        message: progressText,
+                        metadata: ["source": sourceLabel]
+                    )
                     if sourceLabel == "TextCommand" {
                         self.textCommandActivityText = statusText
                     }
@@ -2850,6 +2866,13 @@ final class CompanionManager: ObservableObject {
                     if sourceLabel == "TextCommand" {
                         self.textCommandActivityText = statusText
                     }
+                    PipelineLogStore.shared.record(
+                        category: "hermes",
+                        name: "status",
+                        status: "info",
+                        message: statusText,
+                        metadata: ["source": sourceLabel]
+                    )
                 }
             }
         )
@@ -2864,80 +2887,21 @@ final class CompanionManager: ObservableObject {
         } else if sourceLabel == "TextCommand" {
             textCommandActivityText = "Hermes finished"
         }
+        PipelineLogStore.shared.record(
+            category: "hermes",
+            name: "finished",
+            status: "ok",
+            message: finalText.isEmpty ? "Hermes completed without a text response." : compactStatusText(finalText),
+            metadata: [
+                "source": sourceLabel,
+                "session_id": hermesSessionID ?? ""
+            ]
+        )
 
         return TipTourEngineSubmissionResult(
             ok: true,
             reason: nil,
             message: finalText.isEmpty ? "Hermes completed without a text response." : finalText,
-            acceptedSteps: 0,
-            ignoredSteps: 0,
-            activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
-        )
-    }
-
-    private func runNanoClawPromptWorkflow(
-        prompt: String,
-        sourceLabel: String
-    ) async throws -> TipTourEngineSubmissionResult {
-        let shouldReportTextCommandActivity = sourceLabel == "TextCommand"
-        if shouldReportTextCommandActivity {
-            isTextCommandNanoClawWorkflowActive = true
-            textCommandActivityText = "Connecting to NanoClaw"
-        }
-        defer {
-            if shouldReportTextCommandActivity {
-                isTextCommandNanoClawWorkflowActive = false
-            }
-        }
-
-        let nanoClawPrompt = hermesPromptWithTipTourContext(prompt, sourceLabel: sourceLabel)
-        let result = try await nanoClawAgentClient.streamPrompt(
-            nanoClawPrompt,
-            resumeSessionID: nanoClawSessionID,
-            onChunk: { [weak self] accumulatedText in
-                await MainActor.run {
-                    guard let self else { return }
-                    self.lastTranscript = accumulatedText
-                    if sourceLabel == "TextCommand" {
-                        self.textCommandActivityText = "NanoClaw says - \(self.compactStatusText(accumulatedText, showingTail: true))"
-                    }
-                }
-            },
-            onToolProgress: { [weak self] progressText in
-                await MainActor.run {
-                    guard let self else { return }
-                    let statusText = "NanoClaw action - \(progressText)"
-                    self.lastTranscript = statusText
-                    if sourceLabel == "TextCommand" {
-                        self.textCommandActivityText = statusText
-                    }
-                }
-            },
-            onStatus: { [weak self] statusText in
-                await MainActor.run {
-                    guard let self else { return }
-                    if sourceLabel == "TextCommand" {
-                        self.textCommandActivityText = statusText
-                    }
-                }
-            }
-        )
-
-        nanoClawSessionID = result.sessionID
-        let finalText = result.responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !finalText.isEmpty {
-            lastTranscript = finalText
-            if sourceLabel == "TextCommand" {
-                textCommandActivityText = "NanoClaw - \(compactStatusText(finalText))"
-            }
-        } else if sourceLabel == "TextCommand" {
-            textCommandActivityText = "NanoClaw finished"
-        }
-
-        return TipTourEngineSubmissionResult(
-            ok: true,
-            reason: nil,
-            message: finalText.isEmpty ? "NanoClaw completed without a text response." : finalText,
             acceptedSteps: 0,
             ignoredSteps: 0,
             activeApp: NSWorkspace.shared.frontmostApplication?.localizedName
@@ -2969,7 +2933,8 @@ final class CompanionManager: ObservableObject {
         TipTour Accurate Grounding: \(groundingMode)
         TipTour screenshot streaming setting: \(screenshotMode)
         Fresh screenshots attached to this Hermes turn: \(captures.isEmpty ? "none" : "\n\(screenshotSummary)")
-        During long tasks Hermes can call http://127.0.0.1:19474/v1/screenshots for a fresh raw JPEG screenshot payload when the Screenshots toggle is enabled.
+        During long tasks, ask TipTour to broker visual context with POST http://127.0.0.1:19474/v1/visual-context using visual_context="auto". TipTour will decide whether compact state, a target crop, or a fresh full screenshot is worth sending. When you need visual context for a specific control or object, include query/target_label so TipTour can prefer target_crop. Use /v1/screenshots only for explicit raw screenshot debugging.
+        TipTour can run explicit multi-step workflows through POST http://127.0.0.1:19474/v1/tasks when you already have a concrete step list; otherwise keep planning one action at a time.
         \(activeAppSkillInstructions)
         Current TipTour focus highlight:
         \(currentFocusHighlightContext)
@@ -3007,6 +2972,13 @@ final class CompanionManager: ObservableObject {
         claudeAPIKey: String
     ) async throws -> TipTourEngineSubmissionResult {
         print("[\(sourceLabel)] shared Claude planner workflow entered")
+        PipelineLogStore.shared.record(
+            category: "claude",
+            name: "planner_start",
+            status: "received",
+            message: prompt,
+            metadata: ["source": sourceLabel]
+        )
         if shouldRunNativeDetection {
             if sourceLabel == "TextCommand" {
                 textCommandActivityText = "Refreshing targets"
@@ -3029,9 +3001,20 @@ final class CompanionManager: ObservableObject {
 
         let localTargets = LocalPerceptionTargetCache.shared.currentTargets()
         print("[\(sourceLabel)] local targets=\(localTargets.count)")
+        let targetAppName = currentPointerTargetAppName()
+        PipelineLogStore.shared.record(
+            category: "claude",
+            name: "planner_context",
+            status: "ok",
+            metadata: [
+                "source": sourceLabel,
+                "capture_count": String(captures.count),
+                "local_target_count": String(localTargets.count),
+                "target_app": targetAppName ?? ""
+            ]
+        )
         let focusHighlightContextDescription = plannerFocusHighlightContextDescription(captures: captures)
         print("[\(sourceLabel)] focus highlight context=\(focusHighlightContextDescription == nil ? "none" : "present")")
-        let targetAppName = currentPointerTargetAppName()
         print("[\(sourceLabel)] target app=\(targetAppName ?? "unknown")")
         let targetApplicationForSkills = currentPointerTargetApplicationForSkills()
         print("[\(sourceLabel)] loading app skill instructions")
@@ -3055,6 +3038,17 @@ final class CompanionManager: ObservableObject {
             apiKey: claudeAPIKey
         )
         print("[\(sourceLabel)] Claude planner returned \(plannerResult.plan.steps.count) step(s)")
+        PipelineLogStore.shared.record(
+            category: "claude",
+            name: "planner_result",
+            status: "ok",
+            message: plannerResult.plan.goal,
+            metadata: [
+                "source": sourceLabel,
+                "step_count": String(plannerResult.plan.steps.count),
+                "app": plannerResult.plan.app ?? ""
+            ]
+        )
 
         if sourceLabel == "TextCommand",
            let firstStep = plannerResult.plan.steps.first {
@@ -3063,6 +3057,17 @@ final class CompanionManager: ObservableObject {
         }
         let submissionResult = engineFacade.submitSingleActionWorkflowPlan(plannerResult.plan)
         print("[\(sourceLabel)] submitted single action: ok=\(submissionResult.ok), reason=\(submissionResult.reason ?? "none")")
+        PipelineLogStore.shared.record(
+            category: "claude",
+            name: "submitted_action",
+            status: submissionResult.ok ? "ok" : "failed",
+            message: submissionResult.message,
+            metadata: [
+                "source": sourceLabel,
+                "reason": submissionResult.reason ?? "",
+                "accepted_steps": String(submissionResult.acceptedSteps)
+            ]
+        )
 
         return submissionResult
     }

@@ -11,6 +11,7 @@ import AppKit
 extension Notification.Name {
     static let tipTourDismissPanel = Notification.Name("tipTourDismissPanel")
     static let tipTourOpenSettings = Notification.Name("tipTourOpenSettings")
+    static let tipTourOpenLogs = Notification.Name("tipTourOpenLogs")
     static let tipTourPanelPinStateChanged = Notification.Name("tipTourPanelPinStateChanged")
     static let tipTourUserInterfaceActionExecuted = Notification.Name("tipTourUserInterfaceActionExecuted")
 }
@@ -20,8 +21,10 @@ final class MenuBarPanelManager: NSObject {
     private var statusItem: NSStatusItem?
     private var panel: FloatingCompanionPanel<CompanionPanelView>?
     private var settingsWindowManager: TipTourSettingsWindowManager?
+    private var logsWindowManager: TipTourLogsWindowManager?
     private var dismissPanelObserver: NSObjectProtocol?
     private var openSettingsObserver: NSObjectProtocol?
+    private var openLogsObserver: NSObjectProtocol?
     private var pinStateChangedObserver: NSObjectProtocol?
 
     private let companionManager: CompanionManager
@@ -32,6 +35,7 @@ final class MenuBarPanelManager: NSObject {
         self.companionManager = companionManager
         super.init()
         settingsWindowManager = TipTourSettingsWindowManager(companionManager: companionManager)
+        logsWindowManager = TipTourLogsWindowManager()
         createStatusItem()
         installPanelObservers()
     }
@@ -41,6 +45,9 @@ final class MenuBarPanelManager: NSObject {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = openSettingsObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = openLogsObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = pinStateChangedObserver {
@@ -178,6 +185,16 @@ final class MenuBarPanelManager: NSObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.settingsWindowManager?.show()
+            }
+        }
+
+        openLogsObserver = NotificationCenter.default.addObserver(
+            forName: .tipTourOpenLogs,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.logsWindowManager?.show()
             }
         }
 
